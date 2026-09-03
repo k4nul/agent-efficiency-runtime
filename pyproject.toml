@@ -15,6 +15,7 @@ keywords = ["ai-agent", "cli", "office", "token-efficiency", "local-runtime"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
+  "Intended Audience :: Developers",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -55,6 +56,10 @@ aer = "aer.cli:main"
 
 [project.urls]
 Repository = "https://github.com/k4nul/agent-efficiency-runtime"
+Documentation = "https://github.com/k4nul/agent-efficiency-runtime/tree/main/docs"
+Issues = "https://github.com/k4nul/agent-efficiency-runtime/issues"
+Changelog = "https://github.com/k4nul/agent-efficiency-runtime/blob/main/CHANGELOG.md"
+Security = "https://github.com/k4nul/agent-efficiency-runtime/security/policy"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

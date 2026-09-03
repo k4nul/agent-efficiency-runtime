@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose a bounded capability or improvement
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete workflow or limitation, not only the proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include expected CLI/API shape and bounded output behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: safety
+    attributes:
+      label: Security, compatibility, and resource limits
+      description: Explain new inputs, writes, subprocesses, dependencies, or migration concerns
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Example or evidence
+      description: Add a sanitized use case, benchmark plan, or minimal semantic specification
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched for an existing issue covering this request.
+          required: true
+        - label: The request does not depend on committing credentials or private data.
+          required: true

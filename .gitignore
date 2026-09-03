@@ -18,3 +18,8 @@ build/
 example-output/
 benchmark-output/
 *.bak
+.env
+.env.*
+!.env.example
+.python-version
+.DS_Store

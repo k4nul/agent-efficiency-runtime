@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+- Adds public contribution, conduct, and security-reporting policies.
+- Adds structured bug and feature request forms, a pull request checklist, and Dependabot
+  configuration for Python and GitHub Actions dependencies.
+- Expands package metadata with explicit OSI-approved MIT licensing and project links.
+
 ## 0.1.2 - 2026-09-01
 
 - Closes escaped-quote secret leakage and bounds newline-free command-log sanitization while

@@ -1,0 +1,70 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Follow SECURITY.md and remove secrets, personal data,
+        document contents, local usernames, and unrelated paths from examples and logs.
+  - type: input
+    id: version
+    attributes:
+      label: AER version or commit
+      placeholder: 0.1.2 or a commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and relevant optional tools
+      placeholder: Ubuntu 24.04, Python 3.12, LibreOffice 24.x
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or API call
+      description: Provide a minimal sanitized command, spec, or call
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List deterministic steps and sanitized input characteristics
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include compact JSON output or a minimal traceback; never attach sensitive files
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I reproduced this against the latest release or current main when practical.
+          required: true
+        - label: I removed secrets, personal data, private file contents, and identifying paths.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
