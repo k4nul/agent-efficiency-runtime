@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/k4nul/agent-efficiency-runtime/schemas/artifact-v1.schema.json",
+  "title": "AER artifact specification v1",
+  "type": "object",
+  "required": ["version", "kind"],
+  "properties": {
+    "version": {"const": 1},
+    "kind": {
+      "enum": ["presentation", "document", "workbook", "chart", "html", "markdown"]
+    },
+    "metadata": {"type": "object"},
+    "theme": {"type": "string"},
+    "content": {},
+    "sheets": {"type": "array"}
+  },
+  "additionalProperties": true
+}
+

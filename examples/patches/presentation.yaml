@@ -1,0 +1,6 @@
+version: 1
+operations:
+  - op: pptx.set_text
+    target: slide:id=metrics/shape:id=token-reduction-value
+    value: "63%"
+

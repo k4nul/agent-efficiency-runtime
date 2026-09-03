@@ -1,0 +1,34 @@
+version: 1
+kind: presentation
+theme: business-clean
+metadata:
+  title: Agent Efficiency Runtime
+  locale: ko-KR
+  ratio: "16:9"
+footer: Agent Efficiency Runtime
+content:
+  - id: cover
+    layout: title
+    title: AI Agent Token Optimization
+    subtitle: Deterministic local runtime
+  - id: problem
+    layout: comparison
+    title: 기존 방식과 개선 방식
+    left:
+      title: 기존
+      items:
+        - Python 전체 코드 생성
+        - 전체 파일 재생성
+    right:
+      title: 개선
+      items:
+        - Semantic spec
+        - Element patch
+  - id: metrics
+    layout: metrics
+    title: 목표
+    metrics:
+      - id: token-reduction
+        value: "50%+"
+        label: 반복 작업 토큰 감소
+

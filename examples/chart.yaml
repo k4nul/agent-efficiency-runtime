@@ -1,0 +1,11 @@
+version: 1
+kind: chart
+type: bar
+source: data/metrics.csv
+x: workflow
+y: tokens
+title: 작업 방식별 토큰 사용량
+output:
+  width: 1400
+  height: 900
+

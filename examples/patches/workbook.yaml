@@ -1,0 +1,6 @@
+version: 1
+operations:
+  - op: xlsx.set_cell
+    target: Summary!B3
+    value: 16000
+

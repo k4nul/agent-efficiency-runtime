@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "name": "business-clean",
+  "fonts": ["NanumGothic", "Noto Sans CJK KR", "Arial"],
+  "colors": {
+    "navy": "#192A43",
+    "blue": "#2769C1",
+    "teal": "#19918C",
+    "light": "#F3F6FA",
+    "text": "#202731",
+    "muted": "#5B6776",
+    "accent": "#EE972B"
+  }
+}
+

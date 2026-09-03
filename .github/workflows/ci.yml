@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install '.[dev]'
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: mypy src
+      - run: pytest --cov=aer --cov-report=term-missing
+      - run: python -m build
+      - name: Wheel smoke
+        run: PYTHON=python AER_SMOKE_VENV=/tmp/aer-wheel-smoke AER_SMOKE_HOME=/tmp/aer-wheel-home scripts/wheel_smoke.sh

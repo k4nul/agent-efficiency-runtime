@@ -1,0 +1,36 @@
+version: 1
+kind: workbook
+metadata:
+  title: AER Metrics
+sheets:
+  - id: summary
+    name: Summary
+    columns: [workflow, tokens, calls]
+    rows:
+      - [direct-python, 48210, 8]
+      - [aer, 18400, 3]
+    freeze: A2
+    auto_filter: true
+    table:
+      name: MetricsTable
+    cells:
+      - id: ratio
+        address: E2
+        formula: "=B3/B2"
+        number_format: "0.0%"
+    charts:
+      - type: bar
+        title: Tokens by workflow
+        min_col: 2
+        max_col: 2
+        categories_col: 1
+        min_row: 1
+        max_row: 3
+        anchor: G2
+  - id: raw
+    name: Raw
+    columns: [id, status, total]
+    rows:
+      - [O-001, pending, 43000]
+      - [O-002, complete, 12000]
+

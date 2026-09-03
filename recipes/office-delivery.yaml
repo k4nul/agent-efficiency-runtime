@@ -1,0 +1,17 @@
+version: 1
+name: office-delivery
+description: Build, validate, and package a DOCX delivery.
+inputs:
+  spec: {type: path}
+  output_dir: {type: path}
+steps:
+  - id: build-docx
+    uses: document.build
+    with: {spec: "${{ inputs.spec }}", output: "${{ inputs.output_dir }}/report.docx"}
+  - id: validate-docx
+    uses: artifact.validate
+    with: {target: "${{ steps.build-docx.output }}"}
+  - id: package
+    uses: archive.create
+    with: {source: "${{ inputs.output_dir }}", output: "${{ inputs.output_dir }}.zip"}
+

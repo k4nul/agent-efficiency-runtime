@@ -1,0 +1,22 @@
+version: 1
+name: test-and-package
+description: Run pytest through the compact runner, then package the project.
+inputs:
+  source:
+    type: path
+  output:
+    type: path
+steps:
+  - id: test
+    uses: command.run
+    with:
+      argv: [python, -m, pytest, -q]
+      cwd: "${{ inputs.source }}"
+      timeout: 300
+  - id: package
+    uses: archive.create
+    with:
+      source: "${{ inputs.source }}"
+      output: "${{ inputs.output }}"
+      exclude: [.git/, .venv/, __pycache__/]
+

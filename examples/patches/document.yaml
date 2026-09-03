@@ -1,0 +1,6 @@
+version: 1
+operations:
+  - op: docx.set_block
+    target: block:id=overview-body
+    value: 대용량 작업을 더 작은 컨텍스트로 처리합니다.
+

@@ -1,0 +1,24 @@
+version: 1
+name: presentation-delivery
+description: Build, validate, and package a PPTX delivery.
+inputs:
+  spec:
+    type: path
+  output_dir:
+    type: path
+steps:
+  - id: build-pptx
+    uses: presentation.build
+    with:
+      spec: "${{ inputs.spec }}"
+      output: "${{ inputs.output_dir }}/deck.pptx"
+  - id: validate-pptx
+    uses: artifact.validate
+    with:
+      target: "${{ steps.build-pptx.output }}"
+  - id: package
+    uses: archive.create
+    with:
+      source: "${{ inputs.output_dir }}"
+      output: "${{ inputs.output_dir }}.zip"
+

@@ -1,0 +1,6 @@
+version: 1
+operations:
+  - op: json.set
+    target: /slides/2/title
+    value: 검증 결과
+

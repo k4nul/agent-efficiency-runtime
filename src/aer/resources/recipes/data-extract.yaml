@@ -1,0 +1,15 @@
+version: 1
+name: data-extract
+description: Query a large local table and write a compact extract.
+inputs:
+  source:
+    type: path
+  output:
+    type: path
+steps:
+  - id: query
+    uses: data.query
+    with:
+      source: "${{ inputs.source }}"
+      output: "${{ inputs.output }}"
+

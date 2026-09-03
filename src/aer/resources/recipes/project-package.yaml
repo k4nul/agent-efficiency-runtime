@@ -1,0 +1,20 @@
+version: 1
+name: project-package
+description: Create and verify a deterministic project archive.
+inputs:
+  source:
+    type: path
+  output:
+    type: path
+steps:
+  - id: package
+    uses: archive.create
+    with:
+      source: "${{ inputs.source }}"
+      output: "${{ inputs.output }}"
+      exclude: [.git/, .venv/, __pycache__/]
+  - id: verify
+    uses: archive.verify
+    with:
+      target: "${{ steps.package.output }}"
+

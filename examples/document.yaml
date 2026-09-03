@@ -1,0 +1,32 @@
+version: 1
+kind: document
+metadata:
+  title: Agent Efficiency Runtime Report
+  locale: ko-KR
+header: Agent Efficiency Runtime
+footer: Local deterministic execution
+page_numbers: true
+content:
+  - id: report-title
+    type: title
+    text: Agent Efficiency Runtime
+  - id: overview
+    type: heading
+    level: 1
+    text: 개요
+  - id: overview-body
+    type: paragraph
+    text: 대용량 작업을 모델 컨텍스트 밖에서 결정론적으로 처리합니다.
+  - id: benefits
+    type: bullets
+    items:
+      - compact output
+      - partial patch
+      - content-addressed storage
+  - id: summary-table
+    type: table
+    headers: [기능, 효과]
+    rows:
+      - [Inspect, 필요한 부분만 조회]
+      - [Patch, 전체 재생성 방지]
+
