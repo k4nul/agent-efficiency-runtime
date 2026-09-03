@@ -22,7 +22,7 @@ from pptx import Presentation
 from pypdf import PdfReader
 
 from aer.artifacts.common.spec import manifest_path
-from aer.artifacts.workbook.selectors import normalize_stable_selector
+from aer.artifacts.workbook.selectors import normalize_stable_selector, unescape_sheet_name
 from aer.config import Settings
 from aer.errors import AerError
 from aer.hashing import sha256_file
@@ -30,6 +30,7 @@ from aer.limits import (
     MAX_IMAGE_PIXELS,
     MAX_SVG_DEPTH,
     MAX_SVG_ELEMENTS,
+    MAX_TABULAR_CELLS,
     MAX_TEXT_FILE_BYTES,
 )
 from aer.paths import ensure_regular_input
@@ -551,6 +552,7 @@ def _xlsx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
     invalid_formulas: list[str] = []
     invalid_cell_types: list[str] = []
     invalid_merges: list[str] = []
+    materialized_cells = 0
     for sheet in workbook.worksheets:
         merge_bounds: list[tuple[str, tuple[int, int, int, int]]] = []
         for merged in sheet.merged_cells.ranges:
@@ -570,14 +572,22 @@ def _xlsx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
                         [f"{sheet.title}!{other_name}", f"{sheet.title}!{merged}"]
                     )
             merge_bounds.append((str(merged), bounds))
-        for row in sheet.iter_rows():
-            for cell in row:
-                if cell.data_type not in {"b", "d", "e", "f", "inlineStr", "n", "s"}:
-                    invalid_cell_types.append(f"{sheet.title}!{cell.coordinate}")
-                if isinstance(cell.value, str) and cell.value.startswith("="):
-                    formula_count += 1
-                    if len(cell.value) == 1 or not _formula_parentheses_balanced(cell.value):
-                        invalid_formulas.append(f"{sheet.title}!{cell.coordinate}")
+        materialized_cells += len(sheet._cells)
+        if materialized_cells > MAX_TABULAR_CELLS:
+            raise AerError(
+                "LIMIT_EXCEEDED",
+                "Workbook exceeds the validation cell limit.",
+                "artifact.validate",
+                str(path),
+                {"cells": materialized_cells, "limit": MAX_TABULAR_CELLS},
+            )
+        for cell in sheet._cells.values():
+            if cell.data_type not in {"b", "d", "e", "f", "inlineStr", "n", "s"}:
+                invalid_cell_types.append(f"{sheet.title}!{cell.coordinate}")
+            if isinstance(cell.value, str) and cell.value.startswith("="):
+                formula_count += 1
+                if len(cell.value) == 1 or not _formula_parentheses_balanced(cell.value):
+                    invalid_formulas.append(f"{sheet.title}!{cell.coordinate}")
     if invalid_formulas:
         errors.append(
             {
@@ -612,7 +622,10 @@ def _xlsx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
             broken_names.append(str(defined_name.name))
             continue
         for sheet_name, coordinate in destinations:
-            if sheet_name not in workbook.sheetnames:
+            # openpyxl returns doubled apostrophes from quoted sheet references
+            # (for example O''Brien); undo Excel's quote escaping before lookup.
+            resolved_sheet_name = unescape_sheet_name(sheet_name)
+            if resolved_sheet_name not in workbook.sheetnames:
                 broken_names.append(str(defined_name.name))
                 continue
             try:
@@ -656,6 +669,7 @@ def _xlsx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
             "sheet_count": len(workbook.sheetnames),
             "sheets": workbook.sheetnames,
             "formula_count": formula_count,
+            "materialized_cells": materialized_cells,
             "defined_names": len(list(workbook.defined_names.values())),
             "charts": sum(len(sheet._charts) for sheet in workbook.worksheets),
             "merged_ranges": sum(len(sheet.merged_cells.ranges) for sheet in workbook.worksheets),

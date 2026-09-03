@@ -14,6 +14,7 @@ from matplotlib.ft2font import FT2Font
 from openpyxl import load_workbook
 from PIL import Image
 from pptx import Presentation
+from pptx.enum.chart import XL_CHART_TYPE
 
 import aer.artifacts.build as artifact_build
 import aer.artifacts.document.builder as document_builder
@@ -219,6 +220,57 @@ def test_workbook_build_reopens_with_formula_defined_name_and_manifest(tmp_path:
     ]
 
 
+def test_workbook_quotes_apostrophe_sheet_names_and_rejects_casefold_duplicates(
+    tmp_path: Path,
+) -> None:
+    quoted_spec = _spec(
+        tmp_path,
+        "quoted-sheet.yaml",
+        {
+            "version": 1,
+            "kind": "workbook",
+            "sheets": [
+                {
+                    "id": "orders",
+                    "name": "O'Brien",
+                    "cells": [{"id": "total", "address": "B2", "value": 7}],
+                    "named_range": "order_data",
+                }
+            ],
+        },
+    )
+    quoted_output = tmp_path / "quoted-sheet.xlsx"
+
+    build_artifact(quoted_spec, quoted_output, validate=True)
+
+    workbook = load_workbook(quoted_output, data_only=False)
+    assert workbook.sheetnames == ["O'Brien"]
+    assert workbook.defined_names["aer_sheet_orders"].attr_text == "'O''Brien'!$A$1"
+    assert workbook.defined_names["aer_orders_total"].attr_text == "'O''Brien'!B2"
+    assert workbook.defined_names["order_data"].attr_text == "'O''Brien'!A1:B2"
+
+    duplicate_spec = _spec(
+        tmp_path,
+        "duplicate-sheet.yaml",
+        {
+            "version": 1,
+            "kind": "workbook",
+            "sheets": [
+                {"id": "upper", "name": "Data", "rows": [[1]]},
+                {"id": "lower", "name": "data", "rows": [[2]]},
+            ],
+        },
+    )
+    duplicate_output = tmp_path / "duplicate-sheet.xlsx"
+
+    with pytest.raises(AerError) as captured:
+        build_artifact(duplicate_spec, duplicate_output)
+
+    assert captured.value.code == "INVALID_SPEC"
+    assert captured.value.target == "/sheets/1/name"
+    assert not duplicate_output.exists()
+
+
 @pytest.mark.parametrize(
     "cell",
     [
@@ -342,6 +394,64 @@ def test_single_series_presentation_chart_builds(tmp_path: Path) -> None:
     presentation = Presentation(output)
     assert len(presentation.slides) == 1
     assert len(presentation.slides[0].shapes) >= 2
+
+
+def test_presentation_scatter_chart_uses_numeric_xy_data(tmp_path: Path) -> None:
+    spec = _spec(
+        tmp_path,
+        "scatter.yaml",
+        {
+            "version": 1,
+            "kind": "presentation",
+            "content": [
+                {
+                    "id": "scatter",
+                    "layout": "chart",
+                    "chart_type": "scatter",
+                    "categories": [1, 3],
+                    "series": [{"name": "Values", "values": [2, 4]}],
+                }
+            ],
+        },
+    )
+    output = tmp_path / "scatter.pptx"
+
+    build_artifact(spec, output)
+
+    presentation = Presentation(output)
+    chart = next(shape.chart for shape in presentation.slides[0].shapes if shape.has_chart)
+    assert chart.chart_type == XL_CHART_TYPE.XY_SCATTER
+    assert tuple(chart.series[0].values) == (2.0, 4.0)
+
+
+def test_presentation_table_preserves_cells_beyond_header_width(tmp_path: Path) -> None:
+    spec = _spec(
+        tmp_path,
+        "wide-table.yaml",
+        {
+            "version": 1,
+            "kind": "presentation",
+            "content": [
+                {
+                    "id": "wide",
+                    "layout": "table",
+                    "headers": ["first"],
+                    "rows": [["one", "must-not-be-dropped"], ["two"]],
+                }
+            ],
+        },
+    )
+    output = tmp_path / "wide-table.pptx"
+
+    build_artifact(spec, output)
+
+    presentation = Presentation(output)
+    table = next(shape.table for shape in presentation.slides[0].shapes if shape.has_table)
+    assert [[cell.text for cell in row.cells] for row in table.rows] == [
+        ["first", ""],
+        ["one", "must-not-be-dropped"],
+        ["two", ""],
+    ]
 
 
 @pytest.mark.parametrize(

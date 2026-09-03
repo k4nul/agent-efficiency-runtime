@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from contextlib import suppress
 from pathlib import Path
@@ -15,7 +16,7 @@ from aer.limits import (
     MAX_PDF_PAGES,
     MAX_PDF_SPLIT_FILES,
 )
-from aer.paths import atomic_binary_writer, prepare_output_path
+from aer.paths import atomic_binary_writer, atomic_write_bytes, prepare_output_path
 from aer.pdf.safety import (
     bounded_pdf_page_count,
     enforce_pdf_aggregate_input_limit,
@@ -23,6 +24,7 @@ from aer.pdf.safety import (
     extract_pdf_page_text,
     pdf_attachment_names,
 )
+from aer.store import ObjectStore
 
 
 class _BoundedPdfOutput:
@@ -305,10 +307,15 @@ def split_pdf(path: Path, output_dir: Path) -> dict[str, Any]:
     expected_outputs = [
         destination / f"{source.stem}-{index:04d}.pdf" for index in range(1, page_count + 1)
     ]
-    for output in expected_outputs:
+    manifest_path = destination / "manifest.json"
+    for output in [*expected_outputs, manifest_path]:
         if output.exists():
             raise AerError("CONFLICT", "Split output already exists.", "pdf.split", str(output))
     destination_existed = destination.exists()
+    if destination_existed and not destination.is_dir():
+        raise AerError(
+            "INVALID_ARGUMENT", "Split output must be a directory.", "pdf.split", str(destination)
+        )
     destination.mkdir(parents=True, exist_ok=True)
     outputs = []
     created: list[Path] = []
@@ -335,6 +342,26 @@ def split_pdf(path: Path, output_dir: Path) -> dict[str, Any]:
                     "sha256": sha256_file(output),
                 }
             )
+        manifest = {
+            "version": 1,
+            "input": str(source),
+            "input_sha256": sha256_file(source),
+            "count": len(outputs),
+            "files": outputs,
+        }
+        manifest_bytes = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        atomic_write_bytes(manifest_path, manifest_bytes)
+        created.append(manifest_path)
+        manifest_ref = (
+            ObjectStore()
+            .put_bytes(
+                manifest_bytes,
+                filename="manifest.json",
+                mime_type="application/json",
+                source={"operation": "pdf.split", "input": str(source)},
+            )
+            .ref
+        )
     except BaseException:
         for created_output in created:
             created_output.unlink(missing_ok=True)
@@ -347,4 +374,7 @@ def split_pdf(path: Path, output_dir: Path) -> dict[str, Any]:
         "count": len(outputs),
         "bytes_written": total_bytes,
         "files": outputs[:20],
+        "files_truncated": len(outputs) > 20,
+        "manifest": str(manifest_path),
+        "raw_ref": manifest_ref,
     }

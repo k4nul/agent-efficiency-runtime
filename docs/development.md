@@ -16,15 +16,20 @@ Run the narrowest affected test first, then the complete release checks:
 .venv/bin/pytest
 .venv/bin/pytest --cov=aer --cov-report=term-missing
 .venv/bin/python -m build
+PYTHON=.venv/bin/python AER_SMOKE_VENV=/tmp/aer-wheel-smoke \
+  AER_SMOKE_HOME=/tmp/aer-wheel-home scripts/wheel_smoke.sh
+PYTHON=.venv/bin/python AER_SDIST_SMOKE_ROOT=/tmp/aer-sdist-smoke \
+  scripts/sdist_smoke.sh
 ```
 
 Coverage is measured for the `aer` package with subprocess coverage enabled and a configured line
 threshold of 80%. `pytest --cov=aer --cov-report=term-missing` fails below that threshold; do not
 replace it with file-existence or declaration checks.
 
-Install the wheel into a clean environment and run `scripts/wheel_smoke.sh`, then execute the four
-example builds and reopen/patch/validate checks. Do not claim render or visual validation when the
-external tools are absent. When a required external tool is absent, verify the structured
+The wheel and source-distribution smoke scripts create clean environments, execute the four
+example builds outside the repository, reopen/patch/validate artifacts, and exercise Codex
+installation without replacing an existing target. Do not claim render or visual validation when
+the external tools are absent. When a required external tool is absent, verify the structured
 `DEPENDENCY_MISSING` response instead.
 
 ## Contribution rules

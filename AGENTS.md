@@ -30,14 +30,18 @@ python3.11 -m venv .venv
 .venv/bin/pytest
 .venv/bin/pytest --cov=aer --cov-report=term-missing
 .venv/bin/python -m build
+PYTHON=.venv/bin/python AER_SMOKE_VENV=/tmp/aer-wheel-smoke \
+  AER_SMOKE_HOME=/tmp/aer-wheel-home scripts/wheel_smoke.sh
+PYTHON=.venv/bin/python AER_SDIST_SMOKE_ROOT=/tmp/aer-sdist-smoke \
+  scripts/sdist_smoke.sh
 ```
 
 The coverage configuration enables subprocess measurement and enforces at least 80% package line
 coverage for the coverage run.
 
-Before completion, run every command above and install the built wheel into a separate clean
-virtual environment. Run `aer --version`, `aer doctor`, discovery, compact schema lookup, and
-the repository examples from that installed wheel.
+Before completion, run every command above. The smoke scripts install the wheel and source
+distribution into separate clean environments, then run `aer --version`, `aer doctor`, discovery,
+compact schema lookup, and the repository examples outside the checkout.
 
 ## Runtime invariants
 

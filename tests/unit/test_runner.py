@@ -117,6 +117,66 @@ def test_single_huge_lines_cannot_break_the_response_budget() -> None:
     assert len(json.dumps(response).encode()) <= 16 * 1024
 
 
+def test_newline_free_log_sanitization_is_chunk_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fragment_chars = 4096
+    overlap_chars = 128
+    monkeypatch.setattr(runner_command, "_SANITIZE_FRAGMENT_CHARS", fragment_chars)
+    monkeypatch.setattr(runner_command, "_SANITIZE_OVERLAP_CHARS", overlap_chars)
+    original_redact = runner_command.redact_secrets
+    largest_redaction_input = 0
+
+    def tracked_redact(value: str) -> str:
+        nonlocal largest_redaction_input
+        largest_redaction_input = max(largest_redaction_input, len(value))
+        return original_redact(value)
+
+    monkeypatch.setattr(runner_command, "redact_secrets", tracked_redact)
+    payload_size = 2 * 1024 * 1024 + 123
+    store = _MemoryStore()
+
+    result = run_command(
+        _python(f"import sys; sys.stdout.write('x' * {payload_size}); sys.stdout.flush()"),
+        store=store,
+        timeout=10,
+    )
+
+    assert result.ok is True
+    assert largest_redaction_input <= fragment_chars + overlap_chars
+    assert store.data == b"[stdout]\n" + b"x" * payload_size + b"\n"
+    assert result.summary is not None
+    assert len(result.summary.encode()) <= 1024
+
+
+def test_long_quoted_secret_split_across_fragments_never_emits_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fragment_chars = 64
+    monkeypatch.setattr(runner_command, "_SANITIZE_FRAGMENT_CHARS", fragment_chars)
+    monkeypatch.setattr(runner_command, "_SANITIZE_OVERLAP_CHARS", 32)
+    safe_prefix = "x" * (fragment_chars - 4)
+    secret_value = "sensitive-value-" * 1000
+    payload = safe_prefix + '"password": "' + secret_value + '"'
+    store = _MemoryStore()
+
+    result = run_command(
+        _python("import sys; sys.stdout.write(sys.argv[1]); sys.stdout.flush()", payload),
+        store=store,
+        timeout=10,
+    )
+
+    assert result.ok is True
+    assert store.data == (
+        b"[stdout]\n"
+        + safe_prefix.encode()
+        + runner_command._OVERSIZED_LINE_REDACTION.encode()
+        + b"\n"
+    )
+    assert secret_value.encode() not in store.data
+    assert b"sensitive-value-" not in store.data
+
+
 def test_secrets_are_redacted_in_preview_and_stored_log() -> None:
     secret_values = [
         "sk-abcdefghijklmnopqrstuvwxyz",
@@ -190,6 +250,35 @@ def test_json_and_environment_secret_names_are_redacted() -> None:
     redacted = redact_secrets(value)
     for secret in ("plain-value", "another-value", "json-token", "json-password"):
         assert secret not in redacted
+
+
+def test_escaped_quoted_secrets_are_fully_redacted_in_preview_and_raw_log() -> None:
+    password = 'prefix"PASSWORD_SECRET_TAIL'
+    authorization = 'Bearer prefix"AUTH_SECRET_TAIL'
+    encoded = json.dumps({"password": password, "authorization": authorization})
+    direct = redact_secrets(encoded)
+
+    assert json.loads(direct) == {
+        "password": "[REDACTED]",
+        "authorization": "[REDACTED]",
+    }
+
+    store = _MemoryStore()
+    script = f"""
+import sys
+payload = {encoded!r}
+print(payload)
+print('ERROR ' + payload, file=sys.stderr)
+sys.exit(1)
+"""
+    result = run_command(_python(script), store=store)
+    preview = json.dumps(result.to_dict())
+    raw = store.data.decode()
+
+    for secret in (password, authorization, "PASSWORD_SECRET_TAIL", "AUTH_SECRET_TAIL"):
+        assert secret not in preview
+        assert secret not in raw
+    assert raw.count("[REDACTED]") == 4
 
 
 @pytest.mark.parametrize(

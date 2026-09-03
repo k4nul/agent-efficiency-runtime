@@ -32,6 +32,10 @@ _FAILURE_CONTEXT_BYTES = 8 * 1024
 _SUMMARY_BYTES = 1024
 _WARNING_MESSAGE_BYTES = 256
 _MAX_WARNING_KEYS = 4096
+_SANITIZE_FRAGMENT_CHARS = 64 * 1024
+_SANITIZE_OVERLAP_CHARS = 512
+_OVERSIZED_LINE_REDACTION = "[REDACTED OVERSIZED LINE REMAINDER]"
+_OVERSIZED_ANSI_REDACTION = "[REMOVED OVERSIZED TERMINAL SEQUENCE]"
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ANSI_OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 _ERROR_RE = re.compile(
@@ -53,6 +57,15 @@ _SECRET_HINT_RE = re.compile(
     r"\b(?:authorization|cookie|password|passwd|token|secret|credential)\b",
     re.IGNORECASE,
 )
+_STREAM_SECRET_LABEL_RE = re.compile(
+    r"(?:[\"']|(?<![a-z0-9]))(?:authorization|api[ _-]?key|access[ _-]?token|auth[ _-]?token|"
+    r"password|passwd|pwd|cookie|set[ _-]?cookie|client[ _-]?secret|"
+    r"secret[ _-]?access[ _-]?key|access[ _-]?key[ _-]?id|"
+    r"session[ _-]?token|security[ _-]?token|credential|database[ _-]?url|"
+    r"github[ _-]?token|openai[ _-]?token)(?![a-z0-9])",
+    re.IGNORECASE,
+)
+_STREAM_CREDENTIAL_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/@:]+:")
 
 
 class StoredObject(Protocol):
@@ -218,10 +231,11 @@ def redact_secrets(text: str) -> str:
         r"database[ _-]?url|github[ _-]?token|openai[ _-]?token"
     )
     quoted_json_secret = re.compile(
-        rf"(?i)([\"'](?:{json_secret_label})[\"']\s*:\s*)([\"'])[^\r\n]*?\2"
+        rf"(?i)([\"'](?:{json_secret_label})[\"']\s*:\s*)"
+        rf"(?P<quote>[\"'])(?:\\[^\r\n]|(?!(?P=quote))[^\r\n\\])*(?P=quote)"
     )
     redacted = quoted_json_secret.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(2)}",
+        lambda match: f"{match.group(1)}{match.group('quote')}[REDACTED]{match.group('quote')}",
         redacted,
     )
     redacted = re.sub(
@@ -241,7 +255,8 @@ def redact_secrets(text: str) -> str:
         r"(?:aws[_-]?)?(?:session|security)[_-]?token|"
         r"(?:aws[_-]?)?(?:access|secret)[_-]?key|aws[_-]?credential|"
         r"github[_-]?token|openai[_-]?token)\b\s*(?:[:=]\s*|\s+))"
-        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r'(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'
+        r"'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s,;]+)",
         r"\1[REDACTED]",
         redacted,
     )
@@ -356,11 +371,17 @@ _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----"
 _PRIVATE_KEY_END_RE = re.compile(r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----", re.IGNORECASE)
 
 
-def _raw_physical_line(raw_line: bytes) -> str:
-    """Decode a captured line and remove terminal escape sequences only."""
-
-    line = raw_line.decode("utf-8", errors="replace").removesuffix("\n")
+def _strip_terminal_sequences(line: str) -> str:
     return _ANSI_OSC_RE.sub("", _ANSI_CSI_RE.sub("", line))
+
+
+def _stream_secret_start(line: str) -> int | None:
+    starts = [
+        match.start()
+        for pattern in (_STREAM_SECRET_LABEL_RE, _STREAM_CREDENTIAL_URL_RE)
+        if (match := pattern.search(line)) is not None
+    ]
+    return min(starts) if starts else None
 
 
 def _diagnostic_line(line: str) -> str | None:
@@ -407,19 +428,102 @@ def _stream_sanitized_section(
     state = _PrivateKeyState()
     wrote_header = False
     last_line: str | None = None
-    with source.open("rb") as handle:
-        for raw_line in handle:
-            line = _redact_private_key_line(_raw_physical_line(raw_line), state)
-            if line is None:
+    pending = ""
+    suppressed_tail = ""
+    suppress_remainder = False
+    line_open = False
+    line_wrote = False
+
+    def write_piece(value: str) -> None:
+        nonlocal wrote_header, last_line, line_wrote
+        if not wrote_header:
+            destination.write(f"[{label}]\n".encode())
+            wrote_header = True
+        destination.write(value.encode("utf-8", errors="replace"))
+        line_wrote = True
+        diagnostic = _diagnostic_line(value)
+        if diagnostic is not None:
+            diagnostics.add(diagnostic)
+            last_line = _truncate_utf8(diagnostic, _SUMMARY_BYTES)
+
+    def scan_suppressed(value: str) -> None:
+        nonlocal suppressed_tail
+        if not state.active:
+            return
+        candidate = suppressed_tail + value
+        if _PRIVATE_KEY_END_RE.search(candidate) is not None:
+            state.active = False
+            suppressed_tail = ""
+            return
+        suppressed_tail = candidate[-64:]
+
+    def finish_line(value: str | None) -> None:
+        nonlocal pending, suppressed_tail, suppress_remainder, line_open, line_wrote
+        if value is not None:
+            write_piece(value)
+        if line_wrote:
+            destination.write(b"\n")
+        pending = ""
+        suppressed_tail = ""
+        suppress_remainder = False
+        line_open = False
+        line_wrote = False
+
+    with source.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        while True:
+            fragment = handle.readline(_SANITIZE_FRAGMENT_CHARS)
+            if fragment == "":
+                break
+            line_open = True
+            line_end = fragment.endswith("\n")
+            content = fragment[:-1] if line_end else fragment
+            if suppress_remainder:
+                scan_suppressed(content)
+                if line_end:
+                    finish_line(None)
                 continue
-            if not wrote_header:
-                destination.write(f"[{label}]\n".encode())
-                wrote_header = True
-            destination.write(line.encode("utf-8", errors="replace") + b"\n")
-            diagnostic = _diagnostic_line(line)
-            if diagnostic is not None:
-                diagnostics.add(diagnostic)
-                last_line = _truncate_utf8(diagnostic, _SUMMARY_BYTES)
+
+            pending += content
+            if line_end:
+                clean = _strip_terminal_sequences(pending)
+                finish_line(_redact_private_key_line(clean, state))
+                continue
+
+            if len(pending) <= _SANITIZE_OVERLAP_CHARS:
+                continue
+
+            clean = _strip_terminal_sequences(pending)
+            if "\x1b" in clean:
+                write_piece(_OVERSIZED_ANSI_REDACTION)
+                pending = ""
+                suppress_remainder = True
+                continue
+            secret_start = _stream_secret_start(clean)
+            if secret_start is not None:
+                safe_prefix = _redact_private_key_line(clean[:secret_start], state)
+                if safe_prefix is not None:
+                    write_piece(safe_prefix + _OVERSIZED_LINE_REDACTION)
+                pending = ""
+                suppress_remainder = True
+                continue
+            sanitized = _redact_private_key_line(clean, state)
+            if sanitized is None or sanitized != pending:
+                if sanitized is not None:
+                    write_piece(sanitized + _OVERSIZED_LINE_REDACTION)
+                pending = ""
+                suppress_remainder = True
+                continue
+
+            emit_count = len(pending) - _SANITIZE_OVERLAP_CHARS
+            write_piece(pending[:emit_count])
+            pending = pending[emit_count:]
+
+    if line_open:
+        if suppress_remainder:
+            finish_line(None)
+        else:
+            clean = _strip_terminal_sequences(pending)
+            finish_line(_redact_private_key_line(clean, state))
     return last_line
 
 

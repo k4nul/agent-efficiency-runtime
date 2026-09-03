@@ -82,7 +82,7 @@ def result(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
 def test_version_discovery_schema_and_invalid_args_are_compact(cli: Cli) -> None:
     version = successful(cli("--version"))
     assert version["operation"] == "version"
-    assert version["result"] == {"version": "0.1.1"}
+    assert version["result"] == {"version": "0.1.2"}
 
     discovered = cli("discover", "ppt patch")
     discovered_payload = successful(discovered)
@@ -354,6 +354,28 @@ def test_stale_expected_hash_rejects_patch_without_mutation(cli: Cli, tmp_path: 
     assert failed_payload["code"] == "HASH_MISMATCH"
     assert target.read_bytes() == before
     assert "Traceback" not in failed.stdout + failed.stderr
+
+
+def test_patch_backup_preserves_exact_pre_patch_bytes(cli: Cli, tmp_path: Path) -> None:
+    target = tmp_path / "data.json"
+    target.write_text('{"status":"old","preserve":7}\n', encoding="utf-8")
+    patch = tmp_path / "patch.yaml"
+    patch.write_text(
+        "version: 1\noperations:\n  - op: json.set\n    target: /status\n    value: new\n",
+        encoding="utf-8",
+    )
+    before = target.read_bytes()
+
+    patched = result(cli("patch", str(target), "--spec", str(patch), "--backup"))
+
+    backup = target.with_name(target.name + ".bak")
+    assert patched["backup"] == str(backup)
+    assert backup.read_bytes() == before
+    assert hashlib.sha256(backup.read_bytes()).hexdigest() == patched["before_sha256"]
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "status": "new",
+        "preserve": 7,
+    }
 
 
 def test_state_lifecycle_persists_exact_values(cli: Cli, tmp_path: Path) -> None:

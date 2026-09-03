@@ -70,7 +70,9 @@ removal, not an unredacted binary archive. Progress lines, carriage returns, bla
 trailing whitespace remain in the stored ref even though compact diagnostics omit them. If
 combined stdout/stderr exceeds 256 MiB, AER terminates the command and the ref contains the
 normalized, redacted captured prefix; `output_limit_exceeded` distinguishes it from a complete
-successful log.
+successful log. For an oversized newline-free line, AER keeps bounded overlap while sanitizing;
+when a secret or incomplete terminal sequence prevents safe streaming, an explicit marker replaces
+the remainder of that physical line.
 Resource safety also bounds PDF text extraction. A selected page or query returns at most 1 MiB of
 extracted text or match records; if that boundary is reached, `extraction_truncated` is true and
 `raw_content_complete: false` states that the ref contains only the captured prefix or match set.

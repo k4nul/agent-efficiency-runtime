@@ -185,7 +185,10 @@ def test_split_enforces_aggregate_byte_limit_and_removes_partial_outputs(
     assert not destination.exists()
 
 
-def test_extract_and_split_keep_source_metadata(tmp_path: Path) -> None:
+def test_extract_and_split_keep_source_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AER_HOME", str(tmp_path / "aer-home"))
     source = _pdf(tmp_path / "source.pdf", 2, title="Metadata survives")
     extracted = tmp_path / "extracted.pdf"
     split_dir = tmp_path / "split"

@@ -35,7 +35,8 @@ Builds reject more than 10,000 rendered document elements, more than 1,000 prese
 and 1,000,000-cell bounds; workbooks, chart inputs, and tabular conversions use the tighter
 100,000-row bound. PDF inputs are limited to 256 MiB each and merge inputs to 512 MiB in aggregate.
 PDF operations accept at most 100 merge inputs and 10,000 pages, `pdf split` creates at most 1,000
-files, and constructed PDF output is bounded to 512 MiB per operation.
+files, and constructed PDF output is bounded to 512 MiB per operation. Split returns at most 20
+file records inline plus a complete deterministic `manifest.json` and its object-store `raw_ref`.
 
 Default text, repository, PPTX, DOCX, and PDF previews mark shortened fields with
 `text_truncated`. The CLI stores the exact selected or matched records under `raw_ref`; `--full`
@@ -45,6 +46,9 @@ worker truncates a page prefix or query match set, `extraction_truncated` and
 `raw_content_complete: false` distinguish the bounded `raw_ref` from a complete extraction. PDF
 validation checks page count and media boxes throughout; only text presence and automatic
 empty-page evidence are limited to the first 100 pages.
+Plain-text inspection rejects a physical line longer than 1 MiB rather than materializing an
+unbounded line record. Repository ripgrep batches have a 30-second process timeout and fall back
+to the bounded Python search only when ripgrep is unavailable or incompatible.
 `aer doctor` has an optional check for the packaged metadata file for the one built-in presentation
 theme, `business-clean`; it reports `custom_templates_supported: false` and does not advertise a
 custom template system.

@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference, ScatterChart, Series
 from openpyxl.formatting.rule import CellIsRule, ColorScaleRule
 from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import coordinate_to_tuple, get_column_letter
+from openpyxl.utils import coordinate_to_tuple, get_column_letter, quote_sheetname
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
@@ -210,7 +210,8 @@ def build_workbook(
             )
         title = str(sheet_spec.get("name", sheet_spec.get("id", f"Sheet{index + 1}")))
         stable_id = str(sheet_spec.get("id", title))
-        if title in seen_titles:
+        normalized_title = title.casefold()
+        if normalized_title in seen_titles:
             raise AerError(
                 "INVALID_SPEC",
                 "Sheet names must be unique.",
@@ -230,11 +231,14 @@ def build_workbook(
                 "workbook.build",
                 f"/sheets/{index}/id",
             )
-        seen_titles.add(title)
+        seen_titles.add(normalized_title)
         seen_sheet_ids.add(stable_id)
         seen_defined_names.add(sheet_defined_name.casefold())
         sheet = workbook.create_sheet(title)
-        workbook.defined_names.add(DefinedName(sheet_defined_name, attr_text=f"'{title}'!$A$1"))
+        quoted_title = quote_sheetname(title)
+        workbook.defined_names.add(
+            DefinedName(sheet_defined_name, attr_text=f"{quoted_title}!$A$1")
+        )
         rows = sheet_spec.get("rows", [])
         columns = sheet_spec.get("columns")
         if rows and isinstance(rows[0], dict):
@@ -293,7 +297,7 @@ def build_workbook(
                 seen_cell_ids.add(cell_id)
                 seen_defined_names.add(name.casefold())
                 workbook.defined_names.add(
-                    DefinedName(name, attr_text=f"'{title}'!{cell.coordinate}")
+                    DefinedName(name, attr_text=f"{quoted_title}!{cell.coordinate}")
                 )
                 cell_elements.append(
                     {
@@ -381,7 +385,9 @@ def build_workbook(
                     f"/sheets/{index}/named_range",
                 )
             seen_defined_names.add(name.casefold())
-            workbook.defined_names.add(DefinedName(name, attr_text=f"'{title}'!{sheet.dimensions}"))
+            workbook.defined_names.add(
+                DefinedName(name, attr_text=f"{quoted_title}!{sheet.dimensions}")
+            )
         sheet_element: dict[str, Any] = {
             "id": stable_id,
             "type": "sheet",

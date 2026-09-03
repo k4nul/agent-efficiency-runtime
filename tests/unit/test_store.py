@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import aer.store.core as store_core
 from aer.config import Settings
 from aer.errors import AerError
 from aer.store import ObjectStore, format_ref, parse_ref
@@ -93,6 +94,23 @@ def test_put_file_stdin_get_and_cat_are_bounded(tmp_path: Path) -> None:
     assert symlink_output.value.code == "INVALID_ARGUMENT"
 
 
+def test_cat_streams_long_lines_and_preserves_split_crlf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(store_core, "_TEXT_SCAN_CHARS", 4)
+    store = ObjectStore(settings_for(tmp_path / "aer"))
+    record = store.put_bytes(b"abc\r\n" + b"x" * 100, mime_type="text/plain")
+
+    first = store.cat(record.ref, start_line=1, end_line=1, full=True)
+    limited = store.cat(record.ref, start_line=2, max_bytes=5)
+
+    assert first.text == "abc\r\n"
+    assert first.returned_lines == 1
+    assert limited.text == "xxxxx"
+    assert limited.returned_lines == 1
+    assert limited.truncated is True
+
+
 def test_ref_filename_traversal_and_symlink_are_rejected(tmp_path: Path) -> None:
     store = ObjectStore(settings_for(tmp_path / "aer"))
     with pytest.raises(AerError) as bad_ref:
@@ -154,6 +172,26 @@ def test_stdin_limit_and_binary_cat_fail_compactly(tmp_path: Path) -> None:
     with pytest.raises(AerError) as unsupported:
         store.cat(binary.ref)
     assert unsupported.value.code == "UNSUPPORTED_FORMAT"
+
+    utf8_compatible_binary = store.put_bytes(b"\x00\x01ASCII payload")
+    with pytest.raises(AerError) as compatible_binary:
+        store.cat(utf8_compatible_binary.ref)
+    assert compatible_binary.value.code == "UNSUPPORTED_FORMAT"
+
+    late_binary = store.put_bytes(b"x" * (64 * 1024) + b"\x00")
+    with pytest.raises(AerError) as late_control:
+        store.cat(late_binary.ref, full=True)
+    assert late_control.value.code == "UNSUPPORTED_FORMAT"
+
+    c1_control_binary = store.put_bytes(b"printable-prefix\xc2\x9b31m")
+    with pytest.raises(AerError) as c1_control:
+        store.cat(c1_control_binary.ref)
+    assert c1_control.value.code == "UNSUPPORTED_FORMAT"
+
+    declared_binary = store.put_bytes(b"printable", mime_type="application/pdf")
+    with pytest.raises(AerError) as binary_mime:
+        store.cat(declared_binary.ref)
+    assert binary_mime.value.code == "UNSUPPORTED_FORMAT"
 
 
 def test_verify_detects_corrupted_content(tmp_path: Path) -> None:

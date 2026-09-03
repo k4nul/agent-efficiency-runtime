@@ -16,8 +16,13 @@ does not elevate permissions.
   `output_limit_exceeded` instead of silently truncating a successful run.
 - API keys, tokens, authorization headers, passwords, private keys, cookies, AWS/GitHub/OpenAI
   credentials, and credential-bearing database URLs are redacted before preview and log storage.
+  Escape-aware quoted values are consumed in full. A newline-free physical line is sanitized in
+  bounded fragments; if a secret or incomplete terminal sequence makes safe continuation
+  ambiguous, its remainder is replaced by an explicit marker.
 - Object paths derive only from validated lowercase SHA-256 digests. Writes are atomic and locked;
-  input and output symlinks are rejected where replacement could cross a boundary.
+  input and output symlinks are rejected where replacement could cross a boundary. `store cat`
+  scans the selected object's decoded content for binary control characters before returning it
+  and rejects known binary MIME types; binary retrieval uses `store get`.
 - ZIP entry names are checked for absolute paths, `..`, and backslash traversal. ZIP/OOXML input is
   limited to 10,000 entries, 512 MiB total expanded bytes, 256 MiB per entry, and a 200:1 ratio for
   entries of at least 1 MiB. Archive creation rejects source symlinks.
@@ -35,6 +40,9 @@ does not elevate permissions.
   lists, 100 workbook sheets, and 1,000,000 workbook or data-query cells. Workbook and
   tabular-conversion paths enforce a 100,000-row limit; the data-query engine permits up to
   1,000,000 rows subject to its cell limit.
+- Plain-text inspection does not construct a file-sized line array and rejects individual
+  physical lines over 1 MiB. Ripgrep-backed repository batches are killed after 30 seconds,
+  including their POSIX process group.
 - Patch expected hashes prevent stale writes. A failed multi-operation patch leaves the original
   unchanged.
 - Recipes use an allowlist; raw command steps require explicit trust and permission. Recipes that

@@ -22,7 +22,11 @@ from pptx import Presentation
 from pptx.chart.data import ChartData
 
 from aer.artifacts.common.spec import manifest_path
-from aer.artifacts.workbook.selectors import stable_cell_name, stable_sheet_name
+from aer.artifacts.workbook.selectors import (
+    stable_cell_name,
+    stable_sheet_name,
+    unescape_sheet_name,
+)
 from aer.config import Settings
 from aer.errors import AerError
 from aer.hashing import normalized_hash, sha256_bytes, sha256_file
@@ -610,14 +614,18 @@ def _xlsx_target(workbook: Any, target: str) -> tuple[Any, str]:
         defined_name = stable_sheet_name(stable_id)
         if defined_name in workbook.defined_names:
             destinations = list(workbook.defined_names[defined_name].destinations)
-            if len(destinations) != 1 or destinations[0][0] not in workbook.sheetnames:
+            if len(destinations) == 1:
+                resolved_sheet_name = unescape_sheet_name(destinations[0][0])
+            else:
+                resolved_sheet_name = None
+            if resolved_sheet_name not in workbook.sheetnames:
                 raise AerError(
                     "INVALID_SELECTOR",
                     "Workbook sheet ID does not resolve to exactly one sheet.",
                     "workbook.patch",
                     target,
                 )
-            sheet_name = destinations[0][0]
+            sheet_name = resolved_sheet_name
         elif stable_id in workbook.sheetnames:
             sheet_name = stable_id
         if sheet_name is None:
@@ -639,7 +647,7 @@ def _xlsx_target(workbook: Any, target: str) -> tuple[Any, str]:
                     target,
                 )
             destinations = list(workbook.defined_names[cell_name].destinations)
-            if len(destinations) != 1 or destinations[0][0] != sheet_name:
+            if len(destinations) != 1 or unescape_sheet_name(destinations[0][0]) != sheet_name:
                 raise AerError(
                     "INVALID_SELECTOR",
                     "Workbook cell ID does not resolve to exactly one cell in the selected sheet.",

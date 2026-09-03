@@ -8,9 +8,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -49,6 +51,7 @@ _MAX_MATCH_RESULT_BYTES = 64 * 1024 * 1024
 _RG_ARG_BYTES = 64 * 1024
 _RG_BATCH_FILES = 256
 _RG_STDERR_BYTES = 8 * 1024
+_RG_TIMEOUT_SECONDS = 30.0
 
 
 class _RipgrepUnavailable(Exception):
@@ -362,6 +365,7 @@ def _search_with_ripgrep(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 shell=False,
+                start_new_session=os.name == "posix",
             )
         except OSError as exc:
             raise _RipgrepUnavailable from exc
@@ -376,6 +380,15 @@ def _search_with_ripgrep(
             daemon=True,
         )
         stderr_reader.start()
+        timed_out = threading.Event()
+
+        timer = threading.Timer(
+            _RG_TIMEOUT_SECONDS,
+            _expire_process,
+            args=(process, timed_out),
+        )
+        timer.daemon = True
+        timer.start()
         try:
             for raw_event in process.stdout:
                 try:
@@ -405,15 +418,27 @@ def _search_with_ripgrep(
                     raise _RipgrepUnavailable
                 collector.add(_match_record(normalized, lines, line_number, context=context))
         except BaseException:
-            if process.poll() is None:
-                process.kill()
+            _kill_process(process)
             process.wait()
+            timer.cancel()
+            timer.join()
             stderr_reader.join(timeout=1)
             raise
         finally:
             process.stdout.close()
         return_code = process.wait()
+        timer.cancel()
+        timer.join()
         stderr_reader.join(timeout=1)
+        if timed_out.is_set():
+            raise AerError(
+                "COMMAND_TIMEOUT",
+                "Repository search exceeded the ripgrep timeout.",
+                operation="inspect",
+                target=str(root),
+                details={"timeout_seconds": _RG_TIMEOUT_SECONDS},
+                suggested_action="Narrow the query or glob and retry.",
+            )
         if stderr_reader.is_alive():
             process.stderr.close()
             raise _RipgrepUnavailable
@@ -424,6 +449,35 @@ def _search_with_ripgrep(
         engine="ripgrep",
         skipped_binary=len(skipped_paths | cache.failed),
     )
+
+
+def _kill_process(process: subprocess.Popen[bytes]) -> None:
+    """Stop one ripgrep process and its POSIX process group if it is still alive."""
+
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.poll() is None:
+            process.kill()
+    except ProcessLookupError:
+        return
+    except OSError:
+        with suppress(OSError):
+            process.kill()
+
+
+def _expire_process(process: subprocess.Popen[bytes], timed_out: threading.Event) -> None:
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            pass
+    elif process.poll() is not None:
+        return
+    timed_out.set()
+    _kill_process(process)
 
 
 def _path_batches(paths: list[str]) -> list[list[str]]:

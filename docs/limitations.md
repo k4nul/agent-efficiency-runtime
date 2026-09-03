@@ -18,7 +18,8 @@
 - Each PDF input is limited to 256 MiB; merge also limits aggregate input to 512 MiB. PDF v0.1
   operations accept at most 100 merge inputs and 10,000 source/output pages per operation.
   `pdf split` creates at most 1,000 files, and merge/extract/split stream no more than 512 MiB of
-  aggregate output before returning `LIMIT_EXCEEDED`; callers should batch larger jobs.
+  aggregate output before returning `LIMIT_EXCEEDED`; callers should batch larger jobs. Split
+  lists 20 files inline and preserves the complete list in a deterministic manifest and `raw_ref`.
 - PDF text extraction runs in a separate bounded worker. A selected page retains at most 1 MiB of
   extracted UTF-8 text; query matches retain at most 1 MiB in aggregate and 16 KiB per matching
   line. The worker has a 10-second wall timeout and, on POSIX, 8 CPU seconds and a 512 MiB address
@@ -43,8 +44,12 @@
   limit. Joins and Parquet input are not implemented in v0.1.
 - Regex support is deliberately restricted. Structural checks and runtime timeouts reduce denial
   of service risk, but AER is not a general untrusted-regex execution service.
+- Plain-text inspection accepts files up to 64 MiB but rejects a single physical line longer than
+  1 MiB. Repository searches using ripgrep time out each batch after 30 seconds.
 - The command runner terminates a process after more than 256 MiB combined stdout/stderr. Its raw
   ref then preserves the redacted captured prefix, not output the command might have emitted later.
+  An oversized newline-free line that contains a secret or ambiguous terminal sequence may have
+  its remaining content replaced by a marker so secret safety remains bounded.
 - Deterministic ZIP output is byte-identical for the same files in the same Python/zlib
   implementation. Cross-implementation compression bytes are not promised.
 - Semantic Office builds normalize timestamps and IDs where practical but do not promise

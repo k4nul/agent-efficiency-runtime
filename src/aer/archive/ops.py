@@ -53,7 +53,7 @@ def _reject_duplicate_names(entries: list[zipfile.ZipInfo], operation: str) -> N
 
 
 def _files(source: Path, excludes: list[str], output: Path) -> list[tuple[str, Path]]:
-    matcher = pathspec.PathSpec.from_lines("gitwildmatch", excludes)
+    matcher = pathspec.GitIgnoreSpec.from_lines(excludes)
     if source.is_symlink():
         raise AerError(
             "INVALID_ARGUMENT",

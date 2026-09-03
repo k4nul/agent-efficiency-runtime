@@ -7,7 +7,7 @@ from typing import Any
 
 from PIL import Image
 from pptx import Presentation
-from pptx.chart.data import ChartData
+from pptx.chart.data import ChartData, XyChartData
 from pptx.dml.color import RGBColor
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 from pptx.enum.shapes import MSO_SHAPE
@@ -188,8 +188,9 @@ def _add_picture(
 def _add_table(slide: Any, slide_id: str, block: dict[str, Any]) -> Any:
     headers = [str(value) for value in block.get("headers", [])]
     rows = block.get("rows", [])
+    column_count = max([len(headers), *(len(row) for row in rows)], default=0)
     if not headers and rows:
-        headers = [str(index + 1) for index in range(len(rows[0]))]
+        headers = [str(index + 1) for index in range(column_count)]
     if not headers:
         raise AerError(
             "INVALID_SPEC",
@@ -197,6 +198,7 @@ def _add_table(slide: Any, slide_id: str, block: dict[str, Any]) -> Any:
             "presentation.build",
             f"slide:id={slide_id}",
         )
+    headers.extend("" for _ in range(column_count - len(headers)))
     normalized_rows = [[str(value) for value in row] for row in rows]
     shape = slide.shapes.add_table(
         len(normalized_rows) + 1,
@@ -249,23 +251,76 @@ def _chart_type(value: str) -> XL_CHART_TYPE:
 
 
 def _add_chart(slide: Any, slide_id: str, block: dict[str, Any]) -> Any:
-    categories = [str(value) for value in block.get("categories", [])]
+    raw_categories = block.get("categories", [])
     series = block.get("series", [])
-    if not categories or not series:
+    if not raw_categories or not series:
         raise AerError(
             "INVALID_SPEC",
             "Chart requires categories and series.",
             "presentation.build",
             f"slide:id={slide_id}",
         )
-    data = ChartData()
-    data.categories = categories
-    for item in series:
-        data.add_series(
-            str(item.get("name", "Series")), [float(value) for value in item.get("values", [])]
-        )
+    chart_type = str(block.get("chart_type", "bar"))
+    if chart_type == "scatter":
+        try:
+            categories = [float(value) for value in raw_categories]
+        except (TypeError, ValueError) as exc:
+            raise AerError(
+                "INVALID_SPEC",
+                "Scatter chart categories must be numeric x values.",
+                "presentation.build",
+                f"slide:id={slide_id}/categories",
+            ) from exc
+        xy_data = XyChartData()
+        for series_index, item in enumerate(series):
+            values = item.get("values", [])
+            if len(values) != len(categories):
+                raise AerError(
+                    "INVALID_SPEC",
+                    "Scatter chart series must have one y value for each x value.",
+                    "presentation.build",
+                    f"slide:id={slide_id}/series/{series_index}/values",
+                    {"x_values": len(categories), "y_values": len(values)},
+                )
+            xy_series = xy_data.add_series(str(item.get("name", "Series")))
+            try:
+                for x_value, y_value in zip(categories, values, strict=True):
+                    xy_series.add_data_point(x_value, float(y_value))
+            except (TypeError, ValueError) as exc:
+                raise AerError(
+                    "INVALID_SPEC",
+                    "Scatter chart series values must be numeric.",
+                    "presentation.build",
+                    f"slide:id={slide_id}/series/{series_index}/values",
+                ) from exc
+        data: ChartData | XyChartData = xy_data
+    else:
+        category_data = ChartData()
+        category_data.categories = [str(value) for value in raw_categories]
+        for series_index, item in enumerate(series):
+            values = item.get("values", [])
+            if len(values) != len(raw_categories):
+                raise AerError(
+                    "INVALID_SPEC",
+                    "Chart series must have one value for each category.",
+                    "presentation.build",
+                    f"slide:id={slide_id}/series/{series_index}/values",
+                    {"categories": len(raw_categories), "values": len(values)},
+                )
+            try:
+                category_data.add_series(
+                    str(item.get("name", "Series")), [float(value) for value in values]
+                )
+            except (TypeError, ValueError) as exc:
+                raise AerError(
+                    "INVALID_SPEC",
+                    "Chart series values must be numeric.",
+                    "presentation.build",
+                    f"slide:id={slide_id}/series/{series_index}/values",
+                ) from exc
+        data = category_data
     chart_shape = slide.shapes.add_chart(
-        _chart_type(str(block.get("chart_type", "bar"))),
+        _chart_type(chart_type),
         Inches(0.9),
         Inches(1.4),
         Inches(11.5),

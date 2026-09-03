@@ -630,6 +630,46 @@ def test_xlsx_stable_sheet_id_is_independent_from_display_name(tmp_path: Path) -
         workbook.close()
 
 
+def test_xlsx_stable_cell_selector_handles_apostrophe_sheet_name(tmp_path: Path) -> None:
+    spec = _write_yaml(
+        tmp_path / "apostrophe-workbook.yaml",
+        {
+            "version": 1,
+            "kind": "workbook",
+            "sheets": [
+                {
+                    "id": "orders",
+                    "name": "O'Brien",
+                    "cells": [{"id": "total", "address": "B2", "value": 7}],
+                }
+            ],
+        },
+    )
+    target = tmp_path / "apostrophe.xlsx"
+    build_artifact(spec, target)
+    patch = _write_yaml(
+        tmp_path / "apostrophe-patch.yaml",
+        {
+            "version": 1,
+            "operations": [
+                {
+                    "op": "xlsx.set_cell",
+                    "target": "sheet:id=orders/cell:id=total",
+                    "value": 11,
+                }
+            ],
+        },
+    )
+
+    apply_patch(target, patch, validate=True)
+
+    workbook = load_workbook(target, data_only=False)
+    try:
+        assert workbook["O'Brien"]["B2"].value == 11
+    finally:
+        workbook.close()
+
+
 def test_xlsx_stable_sheet_id_wins_over_conflicting_display_name(tmp_path: Path) -> None:
     spec = _write_yaml(
         tmp_path / "conflicting-workbook.yaml",

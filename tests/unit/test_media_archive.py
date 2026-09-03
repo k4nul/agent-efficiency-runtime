@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from aer.errors import AerError
 from aer.hashing import sha256_file
 from aer.image import batch_images, crop_image, fit_image, inspect_image, resize_image
 from aer.pdf import extract_pdf, inspect_pdf, merge_pdfs, parse_pages, split_pdf
+from aer.store import ObjectStore
 
 
 def _image(path: Path, size: tuple[int, int] = (120, 80), color: str = "#2769C1") -> Path:
@@ -194,7 +196,10 @@ def test_image_input_byte_limit_is_checked_before_pillow(
     assert limited.value.code == "LIMIT_EXCEEDED"
 
 
-def test_pdf_page_parser_and_merge_extract_split_reopen(tmp_path: Path) -> None:
+def test_pdf_page_parser_and_merge_extract_split_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AER_HOME", str(tmp_path / "aer-home"))
     first = _pdf(tmp_path / "first.pdf", 2, title="First")
     second = _pdf(tmp_path / "second.pdf", 1, title="Second")
     assert parse_pages("1-2,2,3", 3) == [0, 1, 2]
@@ -220,6 +225,29 @@ def test_pdf_page_parser_and_merge_extract_split_reopen(tmp_path: Path) -> None:
     split_result = split_pdf(merged, split_dir)
     assert split_result["count"] == 3
     assert all(len(PdfReader(item["output"]).pages) == 1 for item in split_result["files"])
+    manifest = json.loads(Path(split_result["manifest"]).read_text(encoding="utf-8"))
+    assert manifest["files"] == split_result["files"]
+    assert ObjectStore().verify(split_result["raw_ref"]).digest == sha256_file(
+        Path(split_result["manifest"])
+    )
+
+
+def test_pdf_split_preserves_complete_output_list_in_manifest_and_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AER_HOME", str(tmp_path / "aer-home"))
+    source = _pdf(tmp_path / "many.pdf", 21)
+
+    result = split_pdf(source, tmp_path / "pages")
+
+    assert result["count"] == 21
+    assert len(result["files"]) == 20
+    assert result["files_truncated"] is True
+    manifest_path = Path(result["manifest"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert [item["page"] for item in manifest["files"]] == list(range(1, 22))
+    stored = ObjectStore().verify(result["raw_ref"])
+    assert stored.digest == sha256_file(manifest_path)
 
 
 def test_pdf_encryption_and_input_output_conflicts_are_rejected(tmp_path: Path) -> None:
@@ -264,6 +292,35 @@ def test_archive_is_deterministic_manifested_and_verifiable(tmp_path: Path) -> N
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest["deterministic_timestamp"] == "1980-01-01T00:00:00Z"
         assert [item["path"] for item in manifest["files"]] == ["a.txt", "nested/b.txt"]
+
+
+def test_archive_excludes_support_gitignore_negation_without_deprecation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "delivery"
+    (source / "nested").mkdir(parents=True)
+    (source / "drop.tmp").write_text("drop", encoding="utf-8")
+    (source / "keep.tmp").write_text("keep", encoding="utf-8")
+    (source / "nested" / "drop.log").write_text("drop", encoding="utf-8")
+    (source / "nested" / "keep.log").write_text("keep", encoding="utf-8")
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    output = tmp_path / "filtered.zip"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        create_archive(
+            source,
+            output,
+            excludes=["*.tmp", "!keep.tmp", "nested/**", "!nested/keep.log"],
+        )
+
+    listed = list_archive(output)
+    assert [entry["path"] for entry in listed["entries"]] == [
+        "keep.tmp",
+        "keep.txt",
+        "nested/keep.log",
+        "manifest.json",
+    ]
 
 
 def test_archive_rejects_reserved_manifest_as_single_input(tmp_path: Path) -> None:

@@ -31,6 +31,21 @@ _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _REF_PATTERN = re.compile(r"^aer://sha256/([0-9a-f]{64})$")
 _CHUNK_SIZE = 1024 * 1024
 _MAX_SOURCE_METADATA_BYTES = 64 * 1024
+_TEXT_SCAN_CHARS = 64 * 1024
+_TEXTUAL_APPLICATION_TYPES = {
+    "application/json",
+    "application/ld+json",
+    "application/sql",
+    "application/toml",
+    "application/x-httpd-php",
+    "application/x-javascript",
+    "application/x-ndjson",
+    "application/x-sh",
+    "application/x-yaml",
+    "application/xml",
+    "application/yaml",
+    "application/javascript",
+}
 
 
 def _utc_now() -> datetime:
@@ -527,13 +542,30 @@ class ObjectStore:
                 operation=operation,
                 hash_content=True,
             )
+            self._ensure_text_object(path, record, encoding=encoding, operation=operation)
             try:
                 with path.open("r", encoding=encoding, errors="strict", newline="") as handle:
-                    for line_number, line in enumerate(handle, start=1):
-                        if line_number < first:
-                            continue
-                        if end_line is not None and line_number > end_line:
+                    line_number = 1
+                    counted_line = False
+                    carry = ""
+                    while end_line is None or line_number <= end_line:
+                        read_size = max(1, _TEXT_SCAN_CHARS - len(carry))
+                        line = carry + handle.readline(read_size)
+                        carry = ""
+                        if not line:
                             break
+                        if line.endswith("\r"):
+                            next_character = handle.read(1)
+                            if next_character == "\n":
+                                line += next_character
+                            else:
+                                carry = next_character
+                        line_end = line.endswith(("\n", "\r"))
+                        if line_number < first:
+                            if line_end:
+                                line_number += 1
+                                counted_line = False
+                            continue
                         encoded = line.encode("utf-8")
                         if not full and emitted_bytes + len(encoded) > max_bytes:
                             remaining = max_bytes - emitted_bytes
@@ -541,14 +573,21 @@ class ObjectStore:
                                 partial = encoded[:remaining].decode("utf-8", errors="ignore")
                                 if partial:
                                     selected.append(partial)
-                                    returned_lines += 1
+                                    if not counted_line:
+                                        returned_lines += 1
+                                        counted_line = True
                             truncated = True
                             last_line = line_number
                             break
                         selected.append(line)
+                        if not counted_line:
+                            returned_lines += 1
+                            counted_line = True
                         emitted_bytes += len(encoded)
-                        returned_lines += 1
                         last_line = line_number
+                        if line_end:
+                            line_number += 1
+                            counted_line = False
             except (LookupError, UnicodeDecodeError) as exc:
                 raise AerError(
                     "UNSUPPORTED_FORMAT",
@@ -567,6 +606,59 @@ class ObjectStore:
             truncated=truncated,
             raw_ref=ref if truncated else None,
         )
+
+    @staticmethod
+    def _ensure_text_object(
+        path: Path,
+        record: ObjectRecord,
+        *,
+        encoding: str,
+        operation: str,
+    ) -> None:
+        mime = record.mime_type.partition(";")[0].strip().casefold()
+        if mime and not (
+            mime.startswith("text/")
+            or mime in _TEXTUAL_APPLICATION_TYPES
+            or mime.endswith(("+json", "+xml", "+yaml"))
+            or mime == "application/octet-stream"
+        ):
+            raise AerError(
+                "UNSUPPORTED_FORMAT",
+                "Stored binary objects cannot be returned by store cat.",
+                operation=operation,
+                target=record.ref,
+                details={"mime_type": record.mime_type},
+                suggested_action="Use 'aer store get' to materialize the object safely.",
+            )
+        try:
+            disallowed_controls = 0
+            with path.open("r", encoding=encoding, errors="strict", newline="") as handle:
+                while chunk := handle.read(_TEXT_SCAN_CHARS):
+                    disallowed_controls += sum(
+                        1
+                        for character in chunk
+                        if (ord(character) < 32 or 0x7F <= ord(character) <= 0x9F)
+                        and character not in "\t\n\r\f"
+                    )
+                    if disallowed_controls:
+                        break
+        except (LookupError, UnicodeDecodeError) as exc:
+            raise AerError(
+                "UNSUPPORTED_FORMAT",
+                "Stored object cannot be decoded as the requested text encoding.",
+                operation=operation,
+                target=record.ref,
+                details={"encoding": encoding},
+            ) from exc
+        if disallowed_controls:
+            raise AerError(
+                "UNSUPPORTED_FORMAT",
+                "Stored binary objects cannot be returned by store cat.",
+                operation=operation,
+                target=record.ref,
+                details={"control_characters_observed": disallowed_controls},
+                suggested_action="Use 'aer store get' to materialize the object safely.",
+            )
 
     def list(self, *, limit: int = 20, offset: int = 0) -> list[ObjectRecord]:
         """List metadata newest-first without reading object bodies."""

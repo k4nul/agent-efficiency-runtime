@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-efficiency-runtime"
-version = "0.1.1"
+version = "0.1.2"
 description = "A deterministic local execution layer that keeps bulky agent work out of model context."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -19,6 +19,8 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
 dependencies = [

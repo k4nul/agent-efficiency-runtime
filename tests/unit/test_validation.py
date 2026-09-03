@@ -102,6 +102,35 @@ def test_xlsx_validation_rejects_misordered_formula_parentheses(tmp_path: Path) 
     assert formula_error["details"]["cells"] == ["Sheet!A1"]
 
 
+def test_xlsx_validation_does_not_expand_sparse_rectangles_and_limits_real_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sparse = tmp_path / "sparse.xlsx"
+    workbook = Workbook()
+    workbook.active["XFD1048576"] = 1
+    workbook.save(sparse)
+    workbook.close()
+
+    sparse_result = validate_file(sparse)
+
+    assert sparse_result["valid"] is True
+    assert sparse_result["checks"]["materialized_cells"] == 1
+
+    bounded = tmp_path / "bounded.xlsx"
+    workbook = Workbook()
+    workbook.active["A1"] = 1
+    workbook.active["A2"] = 2
+    workbook.save(bounded)
+    workbook.close()
+    monkeypatch.setattr(validation_engine, "MAX_TABULAR_CELLS", 1)
+
+    with pytest.raises(AerError) as captured:
+        validate_file(bounded)
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
+    assert captured.value.details == {"cells": 2, "limit": 1}
+
+
 def test_generated_svg_chart_passes_structural_validation(tmp_path: Path) -> None:
     data = tmp_path / "chart.csv"
     data.write_text("label,value\nA,1\nB,2\n", encoding="utf-8")

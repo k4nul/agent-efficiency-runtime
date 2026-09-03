@@ -22,7 +22,11 @@ from pptx.exc import PackageNotFoundError as PptxPackageNotFoundError
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-from aer.artifacts.workbook.selectors import stable_cell_name, stable_sheet_name
+from aer.artifacts.workbook.selectors import (
+    stable_cell_name,
+    stable_sheet_name,
+    unescape_sheet_name,
+)
 from aer.errors import AerError
 from aer.inspect.common import RawSink, compact_line, parse_inclusive_range, preserve_overflow
 from aer.pdf.safety import (
@@ -112,12 +116,16 @@ def inspect_xlsx(
                 defined_name = stable_sheet_name(selector_sheet)
                 if defined_name in workbook.defined_names:
                     destinations = list(workbook.defined_names[defined_name].destinations)
-                    if len(destinations) != 1 or destinations[0][0] not in workbook.sheetnames:
+                    if len(destinations) == 1:
+                        resolved_sheet_name = unescape_sheet_name(destinations[0][0])
+                    else:
+                        resolved_sheet_name = None
+                    if resolved_sheet_name not in workbook.sheetnames:
                         raise _invalid_selector(
                             selector or selector_sheet,
                             "Stable sheet ID does not resolve to exactly one sheet.",
                         )
-                    selected_name = destinations[0][0]
+                    selected_name = resolved_sheet_name
                 elif selector_sheet in workbook.sheetnames:
                     selected_name = selector_sheet
             elif selected_name not in workbook.sheetnames:
@@ -125,7 +133,7 @@ def inspect_xlsx(
                 if defined_name in workbook.defined_names:
                     destinations = list(workbook.defined_names[defined_name].destinations)
                     if len(destinations) == 1:
-                        selected_name = destinations[0][0]
+                        selected_name = unescape_sheet_name(destinations[0][0])
             if selected_name not in workbook.sheetnames:
                 normalized = selected_name.casefold()
                 selected_name = next(
@@ -146,7 +154,10 @@ def inspect_xlsx(
                         selector or selector_cell_id, "Stable cell ID was not found."
                     )
                 destinations = list(workbook.defined_names[defined_name].destinations)
-                if len(destinations) != 1 or destinations[0][0] != selected_name:
+                if (
+                    len(destinations) != 1
+                    or unescape_sheet_name(destinations[0][0]) != selected_name
+                ):
                     raise _invalid_selector(
                         selector or selector_cell_id,
                         "Stable cell ID does not resolve to the selected sheet.",

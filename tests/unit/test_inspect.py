@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -86,6 +87,38 @@ def test_ambiguous_inspect_regex_is_stopped_by_runtime_timeout(tmp_path: Path) -
 
     assert captured.value.code == "LIMIT_EXCEEDED"
     assert "timeout" in captured.value.message
+
+
+def test_text_inspection_rejects_an_overlong_physical_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "minified.log"
+    target.write_text("x" * 101, encoding="utf-8")
+    monkeypatch.setattr(text_inspect, "_MAX_TEXT_LINE_CHARS", 100)
+
+    with pytest.raises(AerError) as captured:
+        inspect_target(target, query="x")
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
+    assert captured.value.details == {"line": 1, "characters": 101, "limit": 100}
+
+
+def test_streamed_text_context_preserves_splitlines_boundaries(tmp_path: Path) -> None:
+    target = tmp_path / "mixed-newlines.log"
+    target.write_bytes("one\rtwo\r\nthree\u2028four".encode())
+
+    result = inspect_target(target, query="two", context=1)
+
+    assert result["line_count"] == 4
+    assert result["match_count"] == 1
+    assert result["matches"] == [
+        {
+            "line": 2,
+            "text": "two",
+            "before": [{"line": 1, "text": "one"}],
+            "after": [{"line": 3, "text": "three"}],
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -403,6 +436,43 @@ def test_repository_uses_streaming_ripgrep_without_a_shell(
     assert rg_calls[0][1]["shell"] is False
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX executable fixture")
+def test_repository_ripgrep_timeout_is_compact_and_bounded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "one.txt"
+    target.write_text("needle\n", encoding="utf-8")
+    fake_rg = tmp_path / "rg"
+    # The direct process exits while a descendant keeps the capture pipes open.
+    # Timeout cleanup must target the process group, not only the direct child.
+    fake_rg.write_text("#!/bin/sh\nsleep 30 &\nexit 0\n", encoding="utf-8")
+    fake_rg.chmod(0o700)
+    monkeypatch.setattr(repository_inspect.shutil, "which", lambda _name: str(fake_rg))
+    monkeypatch.setattr(repository_inspect, "_RG_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(AerError) as captured:
+        inspect_target(tmp_path, query="needle")
+
+    assert captured.value.code == "COMMAND_TIMEOUT"
+    assert captured.value.details == {"timeout_seconds": 0.05}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")
+def test_repository_timeout_callback_ignores_an_exited_process() -> None:
+    process = subprocess.Popen(
+        ["/bin/sh", "-c", "exit 0"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    process.wait(timeout=1)
+    timed_out = repository_inspect.threading.Event()
+
+    repository_inspect._expire_process(process, timed_out)
+
+    assert timed_out.is_set() is False
+
+
 def test_repository_falls_back_to_bounded_python_search(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -571,6 +641,34 @@ def test_xlsx_selector_resolves_builder_stable_sheet_id(tmp_path: Path) -> None:
 
     assert selected["selection"]["sheet"] == "KPI Dashboard"
     assert selected["selection"]["rows"][0]["cells"][0]["value"] == "tokens"
+
+
+def test_xlsx_stable_cell_selector_handles_apostrophe_sheet_name(tmp_path: Path) -> None:
+    spec = tmp_path / "apostrophe-workbook.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "workbook",
+                "sheets": [
+                    {
+                        "id": "orders",
+                        "name": "O'Brien",
+                        "cells": [{"id": "total", "address": "B2", "value": 7}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "apostrophe.xlsx"
+    build_artifact(spec, target)
+
+    selected = inspect_target(target, selector="sheet:id=orders/cell:id=total")
+
+    assert selected["selection"]["sheet"] == "O'Brien"
+    assert selected["selection"]["range"] == "B2:B2"
+    assert selected["selection"]["rows"][0]["cells"][0]["value"] == 7
 
 
 def test_xlsx_stable_selector_wins_over_conflicting_display_name(tmp_path: Path) -> None:

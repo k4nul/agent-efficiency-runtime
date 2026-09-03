@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## 0.1.2 - 2026-09-01
+
+- Closes escaped-quote secret leakage and bounds newline-free command-log sanitization while
+  preserving compact diagnostics and redacted raw logs.
+- Makes text inspection line-streamed, times out ripgrep repository searches, and prevents
+  UTF-8-compatible binary objects from being emitted by `store cat`.
+- Corrects PowerPoint XY scatter data and wide tables, and makes workbook stable selectors safe
+  for apostrophes and case-insensitive sheet-name collisions.
+- Bounds sparse XLSX validation by materialized cells and makes PDF split results reversible with
+  a complete deterministic manifest and object-store reference.
+- Expands CI to Python 3.11 through 3.14 and adds clean source-distribution, patch-backup, and
+  Codex copy/symlink installation smoke coverage.
+
 ## 0.1.1 - 2026-09-01
 
 - Aligns package metadata, installation guidance, CI, and clean-wheel verification after the

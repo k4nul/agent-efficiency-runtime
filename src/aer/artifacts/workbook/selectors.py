@@ -22,6 +22,12 @@ def stable_cell_name(sheet_id: str, cell_id: str) -> str:
     return f"aer_{defined_name_component(sheet_id)}_{defined_name_component(cell_id)}"
 
 
+def unescape_sheet_name(value: str) -> str:
+    """Undo Excel apostrophe escaping left in openpyxl defined-name destinations."""
+
+    return value.replace("''", "'")
+
+
 def normalize_stable_selector(selector: str) -> str:
     """Normalize manifest and package-side selectors for exact comparison."""
 
