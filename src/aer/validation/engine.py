@@ -26,7 +26,12 @@ from aer.artifacts.workbook.selectors import normalize_stable_selector
 from aer.config import Settings
 from aer.errors import AerError
 from aer.hashing import sha256_file
-from aer.limits import MAX_IMAGE_PIXELS, MAX_TEXT_FILE_BYTES
+from aer.limits import (
+    MAX_IMAGE_PIXELS,
+    MAX_SVG_DEPTH,
+    MAX_SVG_ELEMENTS,
+    MAX_TEXT_FILE_BYTES,
+)
 from aer.paths import ensure_regular_input
 from aer.pdf.safety import (
     MAX_PDF_TEXT_VALIDATION_PAGES,
@@ -271,6 +276,13 @@ def _pptx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
             str(path),
         )
     slide_width, slide_height = int(presentation.slide_width), int(presentation.slide_height)
+    if not presentation.slides:
+        errors.append(
+            {
+                "code": "VALIDATION_FAILED",
+                "message": "Presentation has no slides.",
+            }
+        )
     stable_ids: set[str] = set()
     actual_selectors: set[str] = set()
     overlap_candidates = 0
@@ -497,6 +509,33 @@ def _docx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
     )
 
 
+def _formula_parentheses_balanced(formula: str) -> bool:
+    depth = 0
+    in_double_quote = False
+    in_single_quote = False
+    index = 0
+    while index < len(formula):
+        character = formula[index]
+        if character == '"' and not in_single_quote:
+            if in_double_quote and index + 1 < len(formula) and formula[index + 1] == '"':
+                index += 2
+                continue
+            in_double_quote = not in_double_quote
+        elif character == "'" and not in_double_quote:
+            if in_single_quote and index + 1 < len(formula) and formula[index + 1] == "'":
+                index += 2
+                continue
+            in_single_quote = not in_single_quote
+        elif not in_double_quote and not in_single_quote and character == "(":
+            depth += 1
+        elif not in_double_quote and not in_single_quote and character == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+        index += 1
+    return depth == 0 and not in_double_quote and not in_single_quote
+
+
 def _xlsx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -537,7 +576,7 @@ def _xlsx_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]
                     invalid_cell_types.append(f"{sheet.title}!{cell.coordinate}")
                 if isinstance(cell.value, str) and cell.value.startswith("="):
                     formula_count += 1
-                    if len(cell.value) == 1 or cell.value.count("(") != cell.value.count(")"):
+                    if len(cell.value) == 1 or not _formula_parentheses_balanced(cell.value):
                         invalid_formulas.append(f"{sheet.title}!{cell.coordinate}")
     if invalid_formulas:
         errors.append(
@@ -740,6 +779,92 @@ def _image_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
             {"code": "LIMIT_EXCEEDED", "message": "Image pixel count exceeds the safety limit."}
         )
     return errors, [], {"width": width, "height": height, "format": format_name, "mode": mode}
+
+
+def _svg_checks(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    if path.stat().st_size > MAX_TEXT_FILE_BYTES:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            "SVG exceeds the validation size limit.",
+            "artifact.validate",
+            str(path),
+            {"bytes": path.stat().st_size, "limit": MAX_TEXT_FILE_BYTES},
+        )
+    root_name = ""
+    root_attributes: dict[str, str] = {}
+    element_count = 0
+    stack: list[ElementTree.Element[str]] = []
+    try:
+        with path.open("rb") as handle:
+            for event, element in ElementTree.iterparse(handle, events=("start", "end")):
+                if event == "start":
+                    stack.append(element)
+                    element_count += 1
+                    if element_count > MAX_SVG_ELEMENTS:
+                        raise AerError(
+                            "LIMIT_EXCEEDED",
+                            "SVG exceeds the element-count safety limit.",
+                            "artifact.validate",
+                            str(path),
+                            {"elements": element_count, "limit": MAX_SVG_ELEMENTS},
+                        )
+                    if len(stack) > MAX_SVG_DEPTH:
+                        raise AerError(
+                            "LIMIT_EXCEEDED",
+                            "SVG exceeds the nesting-depth safety limit.",
+                            "artifact.validate",
+                            str(path),
+                            {"depth": len(stack), "limit": MAX_SVG_DEPTH},
+                        )
+                    if element_count == 1:
+                        root_name = (
+                            element.tag.rsplit("}", 1)[-1] if isinstance(element.tag, str) else ""
+                        )
+                        root_attributes = dict(element.attrib)
+                else:
+                    if len(stack) > 1:
+                        stack[-2].remove(element)
+                    element.clear()
+                    stack.pop()
+    except AerError:
+        raise
+    except (OSError, ElementTree.ParseError) as exc:
+        raise AerError(
+            "CORRUPT_FILE",
+            f"Cannot parse SVG: {exc}",
+            "artifact.validate",
+            str(path),
+        ) from exc
+    if root_name != "svg":
+        raise AerError(
+            "CORRUPT_FILE",
+            "SVG root element is missing.",
+            "artifact.validate",
+            str(path),
+        )
+    if element_count == 1:
+        raise AerError(
+            "VALIDATION_FAILED",
+            "SVG contains no renderable structure.",
+            "artifact.validate",
+            str(path),
+        )
+    warnings: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    sidecar = manifest_path(path)
+    if sidecar.exists() or sidecar.is_symlink():
+        _manifest_check(path, warnings, errors)
+    return (
+        errors,
+        warnings,
+        {
+            "root": root_name,
+            "element_count": element_count,
+            "width": root_attributes.get("width"),
+            "height": root_attributes.get("height"),
+            "view_box": root_attributes.get("viewBox"),
+        },
+    )
 
 
 def _raster_pdf(path: Path) -> dict[str, Any]:
@@ -956,6 +1081,11 @@ def validate_file(path: Path, *, strict: bool = False, render: bool = False) -> 
         details.update(format_details)
         if render:
             details["render"] = _raster_pdf(source)
+    elif suffix == ".svg":
+        format_errors, format_warnings, format_details = _svg_checks(source)
+        errors.extend(format_errors)
+        warnings.extend(format_warnings)
+        details.update(format_details)
     elif suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".tif", ".tiff"}:
         format_errors, format_warnings, format_details = _image_checks(source)
         errors.extend(format_errors)
@@ -1044,5 +1174,21 @@ def validate_file(path: Path, *, strict: bool = False, render: bool = False) -> 
         "checks": details,
         "warnings": warnings,
         "automatic_checks_only": True,
-        "human_visual_review_required": suffix in {".pptx", ".docx", ".xlsx", ".pdf"},
+        "human_visual_review_required": suffix
+        in {
+            ".pptx",
+            ".docx",
+            ".xlsx",
+            ".pdf",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".tif",
+            ".tiff",
+            ".svg",
+            ".html",
+            ".htm",
+        },
     }

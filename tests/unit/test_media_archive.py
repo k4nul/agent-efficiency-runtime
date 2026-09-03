@@ -131,6 +131,69 @@ def test_image_batch_does_not_overwrite_existing_manifest_by_default(tmp_path: P
     assert not (output_dir / "new.png").exists()
 
 
+def test_image_batch_limits_and_failure_leave_no_partial_outputs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source_dir = tmp_path / "images"
+    source_dir.mkdir()
+    _image(source_dir / "a.png")
+    _image(source_dir / "b.png")
+
+    monkeypatch.setattr(image_ops, "MAX_IMAGE_BATCH_FILES", 1)
+    with pytest.raises(AerError) as too_many:
+        batch_images(str(source_dir / "*.png"), tmp_path / "limited", width=40)
+    assert too_many.value.code == "LIMIT_EXCEEDED"
+
+    monkeypatch.setattr(image_ops, "MAX_IMAGE_BATCH_FILES", 10)
+    original_resize = image_ops.resize_image
+    calls = 0
+
+    def fail_second(*args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise AerError("CORRUPT_FILE", "simulated failure", "image.batch")
+        return original_resize(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(image_ops, "resize_image", fail_second)
+    output_dir = tmp_path / "atomic"
+    with pytest.raises(AerError):
+        batch_images(str(source_dir / "*.png"), output_dir, width=40)
+    assert not output_dir.exists()
+
+
+def test_image_batch_stops_consuming_glob_after_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    consumed = 0
+
+    def unbounded_matches(pattern: str):
+        nonlocal consumed
+        assert pattern == "*.png"
+        for index in range(100):
+            consumed += 1
+            yield str(tmp_path / f"{index}.png")
+
+    monkeypatch.setattr(image_ops, "MAX_IMAGE_BATCH_FILES", 2)
+    monkeypatch.setattr(image_ops.glob, "iglob", unbounded_matches)
+
+    with pytest.raises(AerError) as captured:
+        batch_images("*.png", tmp_path / "output", width=40)
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
+    assert consumed == 3
+
+
+def test_image_input_byte_limit_is_checked_before_pillow(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = _image(tmp_path / "source.png")
+    monkeypatch.setattr(image_ops, "MAX_IMAGE_INPUT_BYTES", source.stat().st_size - 1)
+    with pytest.raises(AerError) as limited:
+        inspect_image(source)
+    assert limited.value.code == "LIMIT_EXCEEDED"
+
+
 def test_pdf_page_parser_and_merge_extract_split_reopen(tmp_path: Path) -> None:
     first = _pdf(tmp_path / "first.pdf", 2, title="First")
     second = _pdf(tmp_path / "second.pdf", 1, title="Second")
@@ -215,6 +278,20 @@ def test_archive_rejects_reserved_manifest_as_single_input(tmp_path: Path) -> No
     assert not output.exists()
 
 
+def test_archive_rejects_same_single_file_input_and_output_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.zip"
+    source.write_bytes(b"original archive input")
+    before = source.read_bytes()
+
+    with pytest.raises(AerError) as conflict:
+        create_archive(source, source)
+
+    assert conflict.value.code == "CONFLICT"
+    assert source.read_bytes() == before
+
+
 def test_archive_rejects_traversal_symlinks_and_hash_tampering(tmp_path: Path) -> None:
     traversal = tmp_path / "traversal.zip"
     with zipfile.ZipFile(traversal, "w") as archive:
@@ -272,6 +349,25 @@ def test_archive_rejects_traversal_symlinks_and_hash_tampering(tmp_path: Path) -
     with pytest.raises(AerError) as duplicate_error:
         verify_archive(duplicate)
     assert duplicate_error.value.code == "CORRUPT_FILE"
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        [],
+        {"version": 2, "deterministic_timestamp": "1980-01-01T00:00:00Z", "files": []},
+        {"version": 1, "deterministic_timestamp": "current-time", "files": []},
+    ],
+)
+def test_archive_verify_rejects_invalid_manifest_contract(tmp_path: Path, manifest: object) -> None:
+    target = tmp_path / "invalid-manifest.zip"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+
+    with pytest.raises(AerError) as captured:
+        verify_archive(target)
+
+    assert captured.value.code == "CORRUPT_FILE"
 
 
 def test_conversion_reopens_local_formats_and_reports_missing_dependencies(

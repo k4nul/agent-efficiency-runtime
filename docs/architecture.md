@@ -8,7 +8,7 @@ without recursively spawning the CLI.
 agent -> aer CLI -> operation handler -> local file/process/library
                     |       |       |
                     |       |       +-> atomic artifact output
-                    |       +-> disposable hash cache
+                    |       +-> disposable whole-recipe hash cache
                     +-> persistent SHA-256 object store -> aer:// reference
 ```
 
@@ -31,8 +31,9 @@ agent -> aer CLI -> operation handler -> local file/process/library
 
 `AER_HOME` defaults to `~/.aer` and contains `config.toml`, `store`, `cache`, `state`, `recipes`,
 `profiles`, and `database.sqlite3`. Blob bytes live in sharded SHA-256 paths. SQLite stores metadata,
-cache mappings, profiles, and benchmark runs. WAL mode and per-object/file locks permit concurrent
-processes. Persistent store objects and disposable cache objects use separate namespaces and roots.
+cache mappings, profiles, and benchmark runs. Rollback-journal mode plus database-initialization and
+per-object/file locks provide process-safe local access without memory-mapped WAL dependencies.
+Persistent store objects and disposable cache objects use separate namespaces and roots.
 
 ## Stable artifact identity
 
@@ -49,9 +50,11 @@ updates the artifact hash in an existing manifest.
 
 Files are serialized to memory or a private temporary file, fsynced, then replaced with
 `os.replace`. Store publication uses a digest lock and never derives paths from untrusted names.
-Cache keys include capability/version, content hash, normalized spec, relevant configuration, and
-dependency versions where applicable. A changed mtime alone does not invalidate content identity.
-Recipe results are reused only when recorded output hashes still match. Any recipe containing a
+In v0.1, operational cache reuse is implemented for whole-recipe results; the cache module is not
+yet wired into standalone inspect, build, data, conversion, or render commands. Recipe cache keys
+include AER/dependency versions, content hashes, normalized recipe spec, and relevant configuration.
+A changed mtime alone does not invalidate content identity. Recipe results are reused only when
+recorded output hashes still match. Any recipe containing a
 `command.run` step or a literal content-bearing path bypasses recipe-result caching entirely. Exact
 declared-input and prior-step expressions remain cacheable, with declared file and directory inputs
 represented by content hashes.

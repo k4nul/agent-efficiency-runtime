@@ -24,6 +24,11 @@ from aer.runner import run_command
 from aer.state import StateManager
 
 
+@pytest.fixture(autouse=True)
+def _isolated_aer_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AER_HOME", str(tmp_path / "aer-home"))
+
+
 def _settings(home: Path) -> Settings:
     return Settings(
         home=home,

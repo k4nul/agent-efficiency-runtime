@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import warnings
 import xml.etree.ElementTree as ET
+from importlib.resources import as_file, files
 from pathlib import Path
 
 import pytest
 import yaml
 from docx import Document
 from docx.oxml.ns import qn
+from matplotlib.ft2font import FT2Font
 from openpyxl import load_workbook
 from PIL import Image
 from pptx import Presentation
@@ -39,7 +42,7 @@ def test_presentation_build_reopens_with_stable_ids_and_manifest(tmp_path: Path)
             "version": 1,
             "kind": "presentation",
             "theme": "business-clean",
-            "metadata": {"title": "AER 테스트", "locale": "ko-KR"},
+            "metadata": {"title": "AER 테스트", "locale": "ko-KR", "ratio": "16:9"},
             "footer": "Agent Efficiency Runtime",
             "content": [
                 {
@@ -65,6 +68,7 @@ def test_presentation_build_reopens_with_stable_ids_and_manifest(tmp_path: Path)
 
     presentation = Presentation(output)
     assert len(presentation.slides) == 2
+    assert presentation.slide_width * 9 == presentation.slide_height * 16
     assert [slide.element.cSld.get("name") for slide in presentation.slides] == [
         "aer:cover",
         "aer:metrics",
@@ -121,6 +125,35 @@ def test_document_build_reopens_with_bookmarks_table_id_and_manifest(tmp_path: P
     assert caption is not None
     assert caption.get(qn("w:val")) == "aer:summary-table"
     assert _manifest(output)["artifact_sha256"] == sha256_file(output)
+
+
+def test_document_table_preserves_cells_beyond_header_width(tmp_path: Path) -> None:
+    spec = _spec(
+        tmp_path,
+        "ragged-table.yaml",
+        {
+            "version": 1,
+            "kind": "document",
+            "content": [
+                {
+                    "id": "ragged",
+                    "type": "table",
+                    "headers": ["first"],
+                    "rows": [["one", "must-not-be-dropped"], ["two"]],
+                }
+            ],
+        },
+    )
+    output = tmp_path / "ragged-table.docx"
+
+    build_artifact(spec, output)
+
+    table = Document(output).tables[0]
+    assert [[cell.text for cell in row.cells] for row in table.rows] == [
+        ["first", ""],
+        ["one", "must-not-be-dropped"],
+        ["two", ""],
+    ]
 
 
 def test_workbook_build_reopens_with_formula_defined_name_and_manifest(tmp_path: Path) -> None:
@@ -186,7 +219,38 @@ def test_workbook_build_reopens_with_formula_defined_name_and_manifest(tmp_path:
     ]
 
 
-def test_chart_build_creates_reopenable_png_at_requested_dimensions(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "cell",
+    [
+        {"address": "A1", "formula": "SUM(B1:B2)"},
+        {"address": "A1", "formula": 7},
+        {"address": "A1", "formula": "=A2", "value": 7},
+    ],
+)
+def test_workbook_build_rejects_invalid_or_ambiguous_formula(
+    tmp_path: Path, cell: dict[str, object]
+) -> None:
+    spec = _spec(
+        tmp_path,
+        "invalid-formula.yaml",
+        {
+            "version": 1,
+            "kind": "workbook",
+            "sheets": [{"id": "data", "name": "Data", "cells": [cell]}],
+        },
+    )
+    output = tmp_path / "invalid-formula.xlsx"
+
+    with pytest.raises(AerError) as captured:
+        build_artifact(spec, output)
+
+    assert captured.value.code == "INVALID_SPEC"
+    assert not output.exists()
+
+
+def test_chart_build_creates_reopenable_png_at_requested_dimensions(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     data = tmp_path / "metrics.csv"
     data.write_text("workflow,tokens\ndirect,100\naer,40\n", encoding="utf-8")
     spec = _spec(
@@ -204,7 +268,21 @@ def test_chart_build_creates_reopenable_png_at_requested_dimensions(tmp_path: Pa
         },
     )
     output = tmp_path / "chart.png"
-    build_artifact(spec, output)
+    font_resource = files("aer").joinpath("resources/fonts/NanumGothic.ttf")
+    assert font_resource.is_file()
+    with as_file(font_resource) as font_path:
+        assert sha256_file(font_path) == (
+            "48a28e97b34fc8e5b157657633670cd1b7de126cfc414da65ce9c3d5bc8be733"
+        )
+        charmap = FT2Font(str(font_path)).get_charmap()
+        assert all(ord(character) in charmap for character in "토큰사용량")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        build_artifact(spec, output)
+
+    assert not [warning for warning in caught if "Glyph" in str(warning.message)]
+    assert "findfont" not in caplog.text.casefold()
 
     with Image.open(output) as image:
         image.verify()
@@ -264,6 +342,78 @@ def test_single_series_presentation_chart_builds(tmp_path: Path) -> None:
     presentation = Presentation(output)
     assert len(presentation.slides) == 1
     assert len(presentation.slides[0].shapes) >= 2
+
+
+@pytest.mark.parametrize(
+    ("overrides", "target"),
+    [
+        ({"theme": "unknown"}, "/theme"),
+        ({"metadata": {"ratio": "4:3"}}, "/metadata/ratio"),
+    ],
+)
+def test_presentation_rejects_unsupported_theme_or_ratio(
+    tmp_path: Path, overrides: dict[str, object], target: str
+) -> None:
+    spec_value: dict[str, object] = {
+        "version": 1,
+        "kind": "presentation",
+        "content": [{"id": "cover", "layout": "title", "title": "AER"}],
+        **overrides,
+    }
+    spec = _spec(tmp_path, "unsupported-presentation-option.yaml", spec_value)
+    output = tmp_path / "unsupported.pptx"
+
+    with pytest.raises(AerError) as captured:
+        build_artifact(spec, output)
+
+    assert captured.value.code == "INVALID_SPEC"
+    assert captured.value.target == target
+    assert captured.value.details == {
+        "supported": ["business-clean" if target == "/theme" else "16:9"]
+    }
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("kind", ["presentation", "workbook"])
+def test_office_build_rejects_unknown_chart_type(tmp_path: Path, kind: str) -> None:
+    if kind == "presentation":
+        body: dict[str, object] = {
+            "content": [
+                {
+                    "id": "chart",
+                    "layout": "chart",
+                    "categories": ["A"],
+                    "series": [{"name": "Values", "values": [1]}],
+                    "chart_type": "radar",
+                }
+            ]
+        }
+        extension = ".pptx"
+    else:
+        body = {
+            "sheets": [
+                {
+                    "id": "data",
+                    "columns": ["label", "value"],
+                    "rows": [["A", 1]],
+                    "charts": [{"type": "radar"}],
+                }
+            ]
+        }
+        extension = ".xlsx"
+    spec = _spec(
+        tmp_path,
+        f"unknown-{kind}-chart.yaml",
+        {"version": 1, "kind": kind, **body},
+    )
+    output = tmp_path / f"unknown-{kind}{extension}"
+
+    with pytest.raises(AerError) as captured:
+        build_artifact(spec, output)
+
+    assert captured.value.code == "INVALID_SPEC"
+    assert "chart type" in captured.value.message.casefold()
+    assert not output.exists()
 
 
 def test_artifact_builders_enforce_materialization_count_limits(
@@ -384,6 +534,68 @@ def test_dry_run_writes_nothing_and_invalid_spec_is_actionable(tmp_path: Path) -
     assert caught.value.code == "INVALID_SPEC"
     assert caught.value.target == "/version"
     assert caught.value.suggested_action == "Set version: 1"
+
+
+def test_build_validation_happens_before_publish_and_preserves_existing_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    spec = _spec(
+        tmp_path,
+        "validated.yaml",
+        {
+            "version": 1,
+            "kind": "document",
+            "content": [{"id": "body", "type": "paragraph", "text": "new content"}],
+        },
+    )
+    output = tmp_path / "report.docx"
+    manifest = output.with_name(output.name + ".aer.json")
+    output.write_bytes(b"existing artifact")
+    manifest.write_text("existing manifest", encoding="utf-8")
+
+    staged_path: Path | None = None
+
+    def reject(path: Path) -> dict[str, object]:
+        nonlocal staged_path
+        staged_path = path
+        raise AerError(
+            "VALIDATION_FAILED",
+            "simulated rejection",
+            "artifact.validate",
+            str(path),
+            {"checks": {"path": str(path)}},
+        )
+
+    monkeypatch.setattr("aer.validation.validate_file", reject)
+    with pytest.raises(AerError) as rejected:
+        build_artifact(spec, output, validate=True)
+
+    assert rejected.value.code == "VALIDATION_FAILED"
+    assert rejected.value.target == str(output.resolve())
+    assert rejected.value.details["checks"]["path"] == str(output.resolve())
+    assert staged_path is not None
+    assert not staged_path.exists()
+    assert ".aer-build-" not in str(rejected.value.target)
+    assert output.read_bytes() == b"existing artifact"
+    assert manifest.read_text(encoding="utf-8") == "existing manifest"
+
+
+def test_successful_build_validation_reports_published_path(tmp_path: Path) -> None:
+    spec = _spec(
+        tmp_path,
+        "validated-success.yaml",
+        {
+            "version": 1,
+            "kind": "document",
+            "content": [{"id": "body", "type": "paragraph", "text": "valid content"}],
+        },
+    )
+    output = tmp_path / "published.docx"
+
+    result = build_artifact(spec, output, validate=True)
+
+    assert result["validation"]["valid"] is True
+    assert result["validation"]["checks"]["path"] == str(output.resolve())
 
 
 def test_cyclic_yaml_spec_is_rejected_without_partial_artifact(tmp_path: Path) -> None:

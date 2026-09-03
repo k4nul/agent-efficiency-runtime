@@ -65,10 +65,12 @@ def test_success_returns_only_last_summary_and_sanitized_raw_log() -> None:
     assert result.raw_ref == "aer://sha256/" + "a" * 64
     assert b"first successful test" in store.data
     assert b"\x1b" not in store.data
-    assert b"100%" not in store.data
+    assert b"100%" in store.data
     assert store.source == {
         "operation": "command.run",
         "redacted": True,
+        "ansi_removed": True,
+        "progress_preserved": True,
         "output_limit_bytes": 256 * 1024 * 1024,
         "output_limit_exceeded": False,
     }
@@ -150,6 +152,25 @@ sys.exit(1)
         assert secret not in serialized
         assert secret not in stored
     assert "[REDACTED" in stored
+
+
+def test_stored_log_preserves_progress_carriage_returns_and_whitespace() -> None:
+    store = _MemoryStore()
+    result = run_command(
+        _python(
+            "import sys; "
+            "sys.stdout.write('10%\\r20%\\n'); "
+            "sys.stdout.write('meaningful trailing spaces   \\n'); "
+            "sys.stdout.flush(); "
+            "print('done')"
+        ),
+        store=store,
+    )
+
+    assert result.ok is True
+    assert result.summary == "done"
+    assert b"10%\r20%\n" in store.data
+    assert b"meaningful trailing spaces   \n" in store.data
 
 
 def test_private_key_multiline_redaction() -> None:
@@ -332,6 +353,15 @@ def test_timeout_returns_compact_timeout_result() -> None:
     assert result.timed_out
     assert not result.ok
     assert command_response(result)["code"] == "COMMAND_TIMEOUT"
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf"), 0.0])
+def test_runner_rejects_non_finite_or_non_positive_timeout(timeout: float) -> None:
+    with pytest.raises(AerError) as captured:
+        run_command(_python("print('must not run')"), timeout=timeout)
+
+    assert captured.value.code == "INVALID_ARGUMENT"
+    assert captured.value.target == "timeout"
 
 
 @pytest.mark.parametrize("argv", [[], "echo unsafe"])

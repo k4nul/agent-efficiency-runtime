@@ -17,7 +17,7 @@ from datetime import date, datetime
 from datetime import time as datetime_time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TextIO
 
 from aer.errors import AerError
 from aer.limits import MAX_STDIN_BYTES, MAX_TABULAR_CELLS, PREVIEW_ROWS
@@ -56,6 +56,15 @@ class ContentStore(Protocol):
     def put_bytes(
         self,
         data: bytes,
+        *,
+        filename: str | None = None,
+        mime_type: str | None = None,
+        source: Mapping[str, object] | None = None,
+    ) -> StoredObject: ...
+
+    def put_file(
+        self,
+        path: str | Path,
         *,
         filename: str | None = None,
         mime_type: str | None = None,
@@ -788,19 +797,25 @@ def _csv_value(value: object) -> object:
     return value
 
 
-def _serialize_text(rows: Sequence[Row], columns: Sequence[str], suffix: str) -> bytes:
+def _write_text_stream(
+    stream: TextIO, rows: Sequence[Row], columns: Sequence[str], suffix: str
+) -> None:
     if suffix == ".json":
-        return json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+        stream.write("[")
+        for index, row in enumerate(rows):
+            if index:
+                stream.write(",")
+            json.dump(row, stream, ensure_ascii=False, separators=(",", ":"))
+        stream.write("]\n")
+        return
     if suffix in {".jsonl", ".ndjson"}:
-        return (
-            "".join(
-                json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows
-            )
-        ).encode("utf-8")
+        for row in rows:
+            json.dump(row, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.write("\n")
+        return
     delimiter = "\t" if suffix == ".tsv" else ","
-    buffer = io.StringIO(newline="")
     writer = csv.DictWriter(
-        buffer,
+        stream,
         fieldnames=list(columns),
         delimiter=delimiter,
         lineterminator="\n",
@@ -808,17 +823,24 @@ def _serialize_text(rows: Sequence[Row], columns: Sequence[str], suffix: str) ->
     writer.writeheader()
     for row in rows:
         writer.writerow({column: _csv_value(row.get(column)) for column in columns})
+
+
+def _serialize_text(rows: Sequence[Row], columns: Sequence[str], suffix: str) -> bytes:
+    buffer = io.StringIO(newline="")
+    _write_text_stream(buffer, rows, columns, suffix)
     return buffer.getvalue().encode("utf-8")
 
 
-def _atomic_write_bytes(output: Path, data: bytes) -> None:
+def _atomic_write_text_result(
+    output: Path, rows: Sequence[Row], columns: Sequence[str], suffix: str
+) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            _write_text_stream(handle, rows, columns, suffix)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, output)
@@ -865,7 +887,7 @@ def _write_result(output: Path, rows: Sequence[Row], columns: Sequence[str]) -> 
     if suffix == ".xlsx":
         _write_xlsx(output, rows, columns)
     elif suffix in {".csv", ".tsv", ".json", ".jsonl", ".ndjson"}:
-        _atomic_write_bytes(output, _serialize_text(rows, columns, suffix))
+        _atomic_write_text_result(output, rows, columns, suffix)
     else:
         raise AerError(
             "UNSUPPORTED_FORMAT",
@@ -1021,8 +1043,8 @@ def query_data(
 
     result_ref: str | None = None
     if store is not None:
+        source_metadata = {"operation": "data.query", "input": str(source_path)}
         if output_path is not None:
-            stored_data = output_path.read_bytes()
             stored_name = output_path.name
             mime_type = {
                 ".csv": "text/csv",
@@ -1032,16 +1054,24 @@ def query_data(
                 ".ndjson": "application/x-ndjson",
                 ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             }[output_path.suffix.casefold()]
+            result_ref = store.put_file(
+                output_path,
+                filename=stored_name,
+                mime_type=mime_type,
+                source=source_metadata,
+            ).ref
         else:
-            stored_data = _serialize_text(paged_rows, columns, ".jsonl")
             stored_name = f"{source_path.stem}.query.jsonl"
             mime_type = "application/x-ndjson"
-        result_ref = store.put_bytes(
-            stored_data,
-            filename=stored_name,
-            mime_type=mime_type,
-            source={"operation": "data.query", "input": str(source_path)},
-        ).ref
+            with tempfile.TemporaryDirectory(prefix="aer-data-result-") as directory:
+                temporary_result = Path(directory) / stored_name
+                _write_result(temporary_result, paged_rows, columns)
+                result_ref = store.put_file(
+                    temporary_result,
+                    filename=stored_name,
+                    mime_type=mime_type,
+                    source=source_metadata,
+                ).ref
 
     duration_ms = round((time.monotonic() - started) * 1000)
     return DataQueryResult(

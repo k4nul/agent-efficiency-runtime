@@ -1,6 +1,7 @@
 include AGENTS.md
 include CHANGELOG.md
 include README.ko.md
+include THIRD_PARTY_NOTICES.md
 recursive-include .github *.yml
 recursive-include docs *.md
 recursive-include examples *.csv *.yaml
@@ -8,5 +9,7 @@ recursive-include integrations *.md *.sh
 recursive-include recipes *.yaml
 recursive-include schemas *.json
 recursive-include scripts *.sh
+recursive-include src/aer/resources/fonts *.ttf
+recursive-include src/aer/resources/licenses *.txt
 recursive-include templates *.json
 recursive-include tests *.py

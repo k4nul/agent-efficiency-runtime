@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import platform
 import re
 import signal
@@ -8,10 +9,11 @@ import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from importlib import resources
+from importlib import metadata, resources
 from pathlib import Path
 from typing import Any, cast
 
+from aer import __version__
 from aer.archive import create_archive, verify_archive
 from aer.artifacts import build_artifact
 from aer.cache import ContentHashCache
@@ -21,7 +23,7 @@ from aer.data import query_data
 from aer.errors import AerError
 from aer.hashing import normalized_hash, sha256_directory, sha256_file
 from aer.image import crop_image, fit_image, resize_image
-from aer.limits import MAX_SPEC_FILE_BYTES
+from aer.limits import MAX_SPEC_FILE_BYTES, MAX_ZIP_ENTRIES, MAX_ZIP_UNCOMPRESSED_BYTES
 from aer.patch import apply_patch
 from aer.pdf import extract_pdf, merge_pdfs, split_pdf
 from aer.runner import run_command
@@ -30,6 +32,23 @@ from aer.validation import validate_file
 from aer.yaml_safety import load_yaml_safely
 
 EXPRESSION = re.compile(r"\$\{\{\s*(inputs|steps)\.([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_-]+))?\s*\}\}")
+_CACHE_DISTRIBUTIONS = (
+    "filelock",
+    "matplotlib",
+    "openpyxl",
+    "pathspec",
+    "Pillow",
+    "pypdf",
+    "python-docx",
+    "python-pptx",
+    "PyYAML",
+)
+_MAX_RECIPE_INPUT_VALUE_BYTES = 64 * 1024
+_MAX_RECIPE_INPUT_BYTES = 256 * 1024
+_MAX_RECIPE_INTEGER = (1 << 63) - 1
+_MAX_RECIPE_CACHE_FILES = MAX_ZIP_ENTRIES
+_MAX_RECIPE_CACHE_SCAN_ENTRIES = MAX_ZIP_ENTRIES * 4
+_MAX_RECIPE_CACHE_INPUT_BYTES = MAX_ZIP_UNCOMPRESSED_BYTES
 ALLOWED_CAPABILITIES = {
     "presentation.build",
     "document.build",
@@ -289,6 +308,30 @@ def _validate_step_arguments(
                 "recipe.validate",
                 target,
             )
+        if "timeout" in arguments and not _is_exact_expression(arguments["timeout"]):
+            if isinstance(arguments["timeout"], bool):
+                raise AerError(
+                    "INVALID_SPEC",
+                    "command.run timeout must be a finite positive number.",
+                    "recipe.validate",
+                    target,
+                )
+            try:
+                step_timeout = float(arguments["timeout"])
+            except (TypeError, ValueError) as exc:
+                raise AerError(
+                    "INVALID_SPEC",
+                    "command.run timeout must be a finite positive number.",
+                    "recipe.validate",
+                    target,
+                ) from exc
+            if not math.isfinite(step_timeout) or step_timeout <= 0:
+                raise AerError(
+                    "INVALID_SPEC",
+                    "command.run timeout must be a finite positive number.",
+                    "recipe.validate",
+                    target,
+                )
     if capability == "pdf.merge":
         sources = arguments["inputs"]
         if not isinstance(sources, list) or not sources:
@@ -457,24 +500,138 @@ def _input_value(definition: dict[str, Any], raw: Any, name: str) -> Any:
         else:
             return None
     if kind in {"string", "path"}:
-        return str(raw)
+        text_value = str(raw)
+        size = len(text_value.encode("utf-8"))
+        if size > _MAX_RECIPE_INPUT_VALUE_BYTES:
+            raise AerError(
+                "LIMIT_EXCEEDED",
+                "Recipe input value exceeds the size limit.",
+                "recipe.run",
+                name,
+                {"bytes": size, "limit": _MAX_RECIPE_INPUT_VALUE_BYTES},
+            )
+        return text_value
     if kind == "integer":
         try:
-            return int(raw)
+            integer_value = int(raw)
         except (TypeError, ValueError) as exc:
             raise AerError(
                 "INVALID_ARGUMENT", "Recipe input must be an integer.", "recipe.run", name
             ) from exc
+        if integer_value < -_MAX_RECIPE_INTEGER - 1 or integer_value > _MAX_RECIPE_INTEGER:
+            raise AerError(
+                "LIMIT_EXCEEDED",
+                "Recipe integer input exceeds the supported range.",
+                "recipe.run",
+                name,
+            )
+        return integer_value
     if kind == "boolean":
         if isinstance(raw, bool):
             return raw
-        value = str(raw).lower()
-        if value in {"true", "1", "yes"}:
+        boolean_value = str(raw).lower()
+        if boolean_value in {"true", "1", "yes"}:
             return True
-        if value in {"false", "0", "no"}:
+        if boolean_value in {"false", "0", "no"}:
             return False
         raise AerError("INVALID_ARGUMENT", "Recipe input must be a boolean.", "recipe.run", name)
     raise AerError("INVALID_SPEC", "Unsupported recipe input type.", "recipe.run", name)
+
+
+def _validate_inputs_size(inputs: dict[str, Any]) -> None:
+    encoded = json.dumps(
+        inputs,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > _MAX_RECIPE_INPUT_BYTES:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            "Recipe inputs exceed the aggregate size limit.",
+            "recipe.run",
+            details={"bytes": len(encoded), "limit": _MAX_RECIPE_INPUT_BYTES},
+        )
+
+
+def _validate_timeout(timeout: object, *, operation: str, target: str) -> float:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise AerError(
+            "INVALID_ARGUMENT",
+            "Recipe timeout must be a finite positive number.",
+            operation,
+            target,
+        )
+    value = float(timeout)
+    if not math.isfinite(value) or value <= 0:
+        raise AerError(
+            "INVALID_ARGUMENT",
+            "Recipe timeout must be a finite positive number.",
+            operation,
+            target,
+        )
+    return value
+
+
+def _bounded_content_hash(path: Path) -> str:
+    if path.is_file():
+        size = path.stat().st_size
+        if size > _MAX_RECIPE_CACHE_INPUT_BYTES:
+            raise AerError(
+                "LIMIT_EXCEEDED",
+                "Recipe cache input exceeds the size limit.",
+                "recipe.run",
+                str(path),
+                {"bytes": size, "limit": _MAX_RECIPE_CACHE_INPUT_BYTES},
+            )
+        return sha256_file(path)
+    if path.is_dir():
+        scanned_entries = 0
+        files = 0
+        total_bytes = 0
+        for item in path.rglob("*"):
+            scanned_entries += 1
+            if scanned_entries > _MAX_RECIPE_CACHE_SCAN_ENTRIES:
+                raise AerError(
+                    "LIMIT_EXCEEDED",
+                    "Recipe cache directory input exceeds the safety limit.",
+                    "recipe.run",
+                    str(path),
+                    {
+                        "scanned_entries": scanned_entries,
+                        "scan_entry_limit": _MAX_RECIPE_CACHE_SCAN_ENTRIES,
+                        "files": files,
+                        "file_limit": _MAX_RECIPE_CACHE_FILES,
+                        "bytes": total_bytes,
+                        "byte_limit": _MAX_RECIPE_CACHE_INPUT_BYTES,
+                    },
+                )
+            if item.is_symlink() or not item.is_file():
+                continue
+            files += 1
+            total_bytes += item.stat().st_size
+            if files > _MAX_RECIPE_CACHE_FILES or total_bytes > _MAX_RECIPE_CACHE_INPUT_BYTES:
+                raise AerError(
+                    "LIMIT_EXCEEDED",
+                    "Recipe cache directory input exceeds the safety limit.",
+                    "recipe.run",
+                    str(path),
+                    {
+                        "scanned_entries": scanned_entries,
+                        "scan_entry_limit": _MAX_RECIPE_CACHE_SCAN_ENTRIES,
+                        "files": files,
+                        "file_limit": _MAX_RECIPE_CACHE_FILES,
+                        "bytes": total_bytes,
+                        "byte_limit": _MAX_RECIPE_CACHE_INPUT_BYTES,
+                    },
+                )
+        return sha256_directory(path)
+    raise AerError(
+        "INVALID_ARGUMENT",
+        "Recipe cache content input must be a regular file or directory.",
+        "recipe.run",
+        str(path),
+    )
 
 
 def _resolve_expression(
@@ -666,6 +823,7 @@ class RecipeEngine:
                 backup=bool(arguments.get("backup", False)),
                 expected_sha256=arguments.get("expected_sha256"),
                 validate=bool(arguments.get("validate", False)),
+                settings=self.settings,
             )
         elif capability == "artifact.validate":
             result = validate_file(
@@ -762,7 +920,14 @@ class RecipeEngine:
                 run_command(
                     command,
                     cwd=arguments.get("cwd"),
-                    timeout=min(float(arguments.get("timeout", timeout)), timeout),
+                    timeout=min(
+                        _validate_timeout(
+                            arguments.get("timeout", timeout),
+                            operation="recipe.run",
+                            target="command.run timeout",
+                        ),
+                        timeout,
+                    ),
                     store=self.store,
                 ).to_dict()
             )
@@ -788,18 +953,33 @@ class RecipeEngine:
         destination_keys = {"output", "output_dir", "out_dir", "destination"}
 
         def is_content_input(input_name: str) -> bool:
-            token = f"inputs.{input_name}"
-
-            def visit(value: Any, parent_key: str | None = None) -> bool:
+            def first_use(value: Any, parent_key: str | None = None) -> bool | None:
                 if isinstance(value, str):
-                    return token in value and parent_key not in destination_keys
+                    if any(
+                        match.group(1) == "inputs" and match.group(2) == input_name
+                        for match in EXPRESSION.finditer(value)
+                    ):
+                        return parent_key not in destination_keys
+                    return None
                 if isinstance(value, list):
-                    return any(visit(item, parent_key) for item in value)
+                    for item in value:
+                        if (result := first_use(item, parent_key)) is not None:
+                            return result
+                    return None
                 if isinstance(value, dict):
-                    return any(visit(item, str(key)) for key, item in value.items())
-                return False
+                    for key, item in value.items():
+                        if (result := first_use(item, str(key))) is not None:
+                            return result
+                    return None
+                return None
 
-            return any(visit(step.get("with", {})) for step in recipe.get("steps", []))
+            # A path first used as a destination is generated by this recipe.  A
+            # later validation or packaging step may read it, but pre-existing
+            # output bytes must not become part of the next run's input key.
+            for step in recipe.get("steps", []):
+                if (result := first_use(step.get("with", {}))) is not None:
+                    return result
+            return False
 
         values: dict[str, Any] = {}
         for name, value in inputs.items():
@@ -811,11 +991,14 @@ class RecipeEngine:
                     "target": str(path.readlink()),
                 }
             elif is_content_input(name) and path.is_file():
-                values[name] = {"path": str(path.resolve()), "sha256": sha256_file(path)}
+                values[name] = {
+                    "path": str(path.resolve()),
+                    "sha256": _bounded_content_hash(path),
+                }
             elif is_content_input(name) and path.is_dir():
                 values[name] = {
                     "path": str(path.resolve()),
-                    "sha256": sha256_directory(path),
+                    "sha256": _bounded_content_hash(path),
                     "type": "directory",
                 }
             elif recipe.get("inputs", {}).get(name, {}).get("type") == "path":
@@ -823,6 +1006,16 @@ class RecipeEngine:
             else:
                 values[name] = value
         return normalized_hash({"recipe": recipe, "inputs": values})
+
+    @staticmethod
+    def _dependency_versions() -> dict[str, str]:
+        versions = {"aer": __version__, "python": platform.python_version()}
+        for distribution in _CACHE_DISTRIBUTIONS:
+            try:
+                versions[distribution] = metadata.version(distribution)
+            except metadata.PackageNotFoundError:
+                versions[distribution] = "missing"
+        return versions
 
     @staticmethod
     def _cached_outputs_exist(payload: dict[str, Any]) -> bool:
@@ -834,19 +1027,25 @@ class RecipeEngine:
                 return False
             path = Path(str(raw_path))
             if record.get("type") == "file":
-                if (
-                    not path.is_file()
-                    or path.is_symlink()
-                    or sha256_file(path) != record.get("sha256")
-                ):
+                if not path.is_file() or path.is_symlink():
                     return False
+                try:
+                    if _bounded_content_hash(path) != record.get("sha256"):
+                        return False
+                except AerError as exc:
+                    if exc.code == "LIMIT_EXCEEDED":
+                        return False
+                    raise
             elif record.get("type") == "directory":
-                if (
-                    not path.is_dir()
-                    or path.is_symlink()
-                    or sha256_directory(path) != record.get("sha256")
-                ):
+                if not path.is_dir() or path.is_symlink():
                     return False
+                try:
+                    if _bounded_content_hash(path) != record.get("sha256"):
+                        return False
+                except AerError as exc:
+                    if exc.code == "LIMIT_EXCEEDED":
+                        return False
+                    raise
             else:
                 return False
         return True
@@ -881,6 +1080,7 @@ class RecipeEngine:
         allow_raw_command: bool = False,
         timeout: float = 600,
     ) -> dict[str, Any]:
+        timeout = _validate_timeout(timeout, operation="recipe.run", target="timeout")
         recipe, trusted = self._load(name_or_path)
         summary = _validate_recipe(recipe, str(name_or_path))
         if not trusted and not trust:
@@ -902,6 +1102,7 @@ class RecipeEngine:
             name: _input_value(definition, variables.get(name), name)
             for name, definition in recipe.get("inputs", {}).items()
         }
+        _validate_inputs_size(inputs)
         if dry_run:
             return {
                 "dry_run": True,
@@ -926,7 +1127,7 @@ class RecipeEngine:
                 self._cache_inputs(recipe, inputs),
                 spec_hash=normalized_hash(recipe),
                 configuration={"allow_raw_command": allow_raw_command},
-                dependency_versions={"python": platform.python_version()},
+                dependency_versions=self._dependency_versions(),
             )
             cached = self.cache.get_bytes(cache_key)
             if cached:

@@ -35,7 +35,11 @@ def test_doctor_checks_core_services_and_cleans_store_probe(tmp_path: Path) -> N
     result = run_doctor(settings)
     checks = _by_name(result)
 
-    assert result.ok
+    assert result.ok, [
+        (check.name, check.message, check.details)
+        for check in result.checks
+        if check.required and not check.ok
+    ]
     for name in ("python", "aer_home", "sqlite", "object_store", "recipes"):
         assert checks[name].required
         assert checks[name].ok, checks[name]

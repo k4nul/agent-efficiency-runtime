@@ -121,6 +121,13 @@ def create_archive(
         raise AerError(
             "INVALID_ARGUMENT", "Archive output must use .zip.", "archive.create", str(output)
         )
+    if source.exists() and source == output:
+        raise AerError(
+            "CONFLICT",
+            "Archive output must differ from its input source.",
+            "archive.create",
+            str(output),
+        )
     entries = _files(source, excludes or [], output)
     if len(entries) + 1 > MAX_ZIP_ENTRIES:
         raise AerError(
@@ -294,6 +301,27 @@ def verify_archive(path: Path) -> dict[str, Any]:
                 "archive.verify",
                 str(source),
             ) from exc
+        if not isinstance(manifest, dict):
+            raise AerError(
+                "CORRUPT_FILE",
+                "Archive manifest root must be an object.",
+                "archive.verify",
+                str(source),
+            )
+        if manifest.get("version") != 1:
+            raise AerError(
+                "CORRUPT_FILE",
+                "Archive manifest version is unsupported.",
+                "archive.verify",
+                str(source),
+            )
+        if manifest.get("deterministic_timestamp") != "1980-01-01T00:00:00Z":
+            raise AerError(
+                "CORRUPT_FILE",
+                "Archive manifest deterministic timestamp is invalid.",
+                "archive.verify",
+                str(source),
+            )
         manifest_files = manifest.get("files", [])
         if not isinstance(manifest_files, list) or any(
             not isinstance(item, dict)

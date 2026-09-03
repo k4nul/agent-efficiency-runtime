@@ -1,10 +1,11 @@
 # Codex integration
 
-The integration is an ordinary Codex skill under `integrations/codex`. Install AER first, then run:
+The integration is an ordinary Codex skill under `integrations/codex` in the source checkout and
+source distribution; it is not a wheel runtime resource. Install AER first, then run:
 
 ```bash
 ./integrations/codex/install.sh --copy
-# or
+# development checkout only:
 ./integrations/codex/install.sh --symlink --target /explicit/codex/skills
 ```
 
@@ -29,4 +30,3 @@ aer schema presentation.patch --compact
 If discovery or a structured error explicitly says the operation is unsupported, a one-off local
 implementation remains appropriate. Repeated deterministic work should become a tested recipe or
 capability.
-

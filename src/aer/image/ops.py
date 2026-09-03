@@ -3,6 +3,9 @@ from __future__ import annotations
 import glob
 import io
 import json
+import os
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +13,12 @@ from PIL import Image, ImageOps
 
 from aer.errors import AerError
 from aer.hashing import sha256_file
-from aer.limits import MAX_IMAGE_PIXELS
+from aer.limits import (
+    MAX_IMAGE_BATCH_FILES,
+    MAX_IMAGE_BATCH_INPUT_BYTES,
+    MAX_IMAGE_INPUT_BYTES,
+    MAX_IMAGE_PIXELS,
+)
 from aer.paths import (
     atomic_write_bytes,
     atomic_write_text,
@@ -30,6 +38,15 @@ FORMAT_BY_SUFFIX = {
 
 def _open(path: Path) -> Image.Image:
     source = ensure_regular_input(path, operation="image.process")
+    input_bytes = source.stat().st_size
+    if input_bytes > MAX_IMAGE_INPUT_BYTES:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            "Image input exceeds the byte safety limit.",
+            "image.process",
+            str(source),
+            {"bytes": input_bytes, "limit": MAX_IMAGE_INPUT_BYTES},
+        )
     try:
         image = Image.open(source)
         if image.width * image.height > MAX_IMAGE_PIXELS:
@@ -237,9 +254,33 @@ def batch_images(
     strip_metadata: bool = False,
     overwrite: bool = False,
 ) -> dict[str, Any]:
-    matches = sorted(Path(value) for value in glob.glob(pattern))
-    if not matches:
+    if width <= 0:
+        raise AerError("INVALID_ARGUMENT", "Batch width must be positive.", "image.batch")
+    raw_matches: list[str] = []
+    for value in glob.iglob(pattern):
+        raw_matches.append(value)
+        if len(raw_matches) > MAX_IMAGE_BATCH_FILES:
+            raise AerError(
+                "LIMIT_EXCEEDED",
+                "Image batch matched too many files.",
+                "image.batch",
+                pattern,
+                {"files": len(raw_matches), "limit": MAX_IMAGE_BATCH_FILES},
+            )
+    if not raw_matches:
         raise AerError("NOT_FOUND", "Image batch pattern matched no files.", "image.batch", pattern)
+    matches = [
+        ensure_regular_input(Path(value), operation="image.batch") for value in sorted(raw_matches)
+    ]
+    input_bytes = sum(source.stat().st_size for source in matches)
+    if input_bytes > MAX_IMAGE_BATCH_INPUT_BYTES:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            "Image batch input exceeds the aggregate byte limit.",
+            "image.batch",
+            pattern,
+            {"bytes": input_bytes, "limit": MAX_IMAGE_BATCH_INPUT_BYTES},
+        )
     output_dir = prepare_output_path(output_dir, operation="image.batch")
     destinations = [output_dir / source.name for source in matches]
     if len(set(destinations)) != len(destinations):
@@ -250,6 +291,21 @@ def batch_images(
             str(output_dir),
         )
     manifest = output_dir / "manifest.json"
+    if manifest in destinations:
+        raise AerError(
+            "CONFLICT",
+            "Image batch input filename conflicts with manifest.json.",
+            "image.batch",
+            str(manifest),
+        )
+    for source, destination in zip(matches, destinations, strict=True):
+        if source == destination.resolve(strict=False):
+            raise AerError(
+                "CONFLICT",
+                "Image batch output must differ from every input.",
+                "image.batch",
+                str(destination),
+            )
     if not overwrite:
         conflicts = [path for path in [*destinations, manifest] if path.exists()]
         if conflicts:
@@ -260,21 +316,67 @@ def batch_images(
                 str(conflicts[0]),
                 {"conflicts": [str(path) for path in conflicts[:20]]},
             )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results = []
-    for source, destination in zip(matches, destinations, strict=True):
-        results.append(
-            resize_image(
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    output_dir_existed = output_dir.exists()
+    if output_dir_existed and not output_dir.is_dir():
+        raise AerError(
+            "INVALID_ARGUMENT", "Batch output must be a directory.", "image.batch", str(output_dir)
+        )
+    with tempfile.TemporaryDirectory(prefix=".aer-image-batch-", dir=output_dir.parent) as name:
+        temporary = Path(name)
+        staged_dir = temporary / "outputs"
+        backup_dir = temporary / "backup"
+        staged_dir.mkdir()
+        backup_dir.mkdir()
+        results: list[dict[str, Any]] = []
+        staged_outputs: list[Path] = []
+        for source, destination in zip(matches, destinations, strict=True):
+            staged = staged_dir / destination.name
+            result = resize_image(
                 source,
-                destination,
+                staged,
                 width=width,
                 strip_metadata=strip_metadata,
-                overwrite=overwrite,
+                overwrite=False,
             )
+            result["output"] = str(destination)
+            results.append(result)
+            staged_outputs.append(staged)
+        staged_manifest = temporary / "manifest.json"
+        atomic_write_text(
+            staged_manifest,
+            json.dumps({"version": 1, "files": results}, indent=2, sort_keys=True) + "\n",
         )
-    atomic_write_text(
-        manifest, json.dumps({"version": 1, "files": results}, indent=2, sort_keys=True) + "\n"
-    )
+        moved: list[tuple[Path, Path]] = []
+        published: list[Path] = []
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for index, destination in enumerate([*destinations, manifest]):
+                if destination.exists():
+                    if destination.is_dir():
+                        raise AerError(
+                            "CONFLICT",
+                            "Batch output path is an existing directory.",
+                            "image.batch",
+                            str(destination),
+                        )
+                    backup = backup_dir / f"{index:04d}"
+                    os.replace(destination, backup)
+                    moved.append((backup, destination))
+            for staged, destination in zip(
+                [*staged_outputs, staged_manifest], [*destinations, manifest], strict=True
+            ):
+                os.replace(staged, destination)
+                published.append(destination)
+        except BaseException:
+            for destination in published:
+                destination.unlink(missing_ok=True)
+            for backup, destination in reversed(moved):
+                os.replace(backup, destination)
+            if not output_dir_existed:
+                with suppress(OSError):
+                    output_dir.rmdir()
+            raise
     return {
         "output_dir": str(output_dir),
         "count": len(results),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import multiprocessing
+import os
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
@@ -109,6 +110,37 @@ def test_ref_filename_traversal_and_symlink_are_rejected(tmp_path: Path) -> None
     with pytest.raises(AerError) as symlink_error:
         store.put_file(link)
     assert symlink_error.value.code == "INVALID_ARGUMENT"
+
+
+def test_database_initialization_lock_symlink_is_rejected(tmp_path: Path) -> None:
+    settings = settings_for(tmp_path / "aer")
+    settings.ensure()
+    outside = tmp_path / "outside-lock"
+    outside.write_bytes(b"unchanged")
+    lock_path = settings.home / ".database-init.lock"
+    lock_path.symlink_to(outside)
+
+    with pytest.raises(AerError) as captured:
+        ObjectStore(settings)
+
+    assert captured.value.code == "INVALID_ARGUMENT"
+    assert captured.value.target == str(lock_path)
+    assert outside.read_bytes() == b"unchanged"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_shared_writable_database_initialization_lock_is_rejected(tmp_path: Path) -> None:
+    settings = settings_for(tmp_path / "aer")
+    settings.ensure()
+    lock_path = settings.home / ".database-init.lock"
+    lock_path.write_bytes(b"")
+    lock_path.chmod(0o660)
+
+    with pytest.raises(AerError) as captured:
+        ObjectStore(settings)
+
+    assert captured.value.code == "INVALID_ARGUMENT"
+    assert captured.value.target == str(lock_path)
 
 
 def test_stdin_limit_and_binary_cat_fail_compactly(tmp_path: Path) -> None:

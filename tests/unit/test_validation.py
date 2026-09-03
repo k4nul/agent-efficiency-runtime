@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from openpyxl import Workbook
 from PIL import Image
+from pptx import Presentation
 from pypdf import PageObject, PdfWriter
 
 import aer.pdf.safety as pdf_safety
@@ -62,6 +64,94 @@ def test_generated_office_artifacts_pass_structural_validation(tmp_path: Path) -
         assert result["checks"][expected_check] == 1
         assert result["automatic_checks_only"] is True
         assert result["human_visual_review_required"] is True
+
+
+def test_empty_presentation_is_not_reported_valid(tmp_path: Path) -> None:
+    target = tmp_path / "empty.pptx"
+    Presentation().save(target)
+
+    with pytest.raises(AerError) as captured:
+        validate_file(target)
+
+    assert captured.value.code == "VALIDATION_FAILED"
+    assert captured.value.details["errors"] == [
+        {"code": "VALIDATION_FAILED", "message": "Presentation has no slides."}
+    ]
+
+
+def test_xlsx_validation_rejects_misordered_formula_parentheses(tmp_path: Path) -> None:
+    target = tmp_path / "formula.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet["A1"] = "=)("
+    sheet["A2"] = '=")"&"("'
+    workbook.create_sheet("Q1)")["A1"] = 1
+    sheet["A3"] = "='Q1)'!A1"
+    workbook.save(target)
+    workbook.close()
+
+    with pytest.raises(AerError) as captured:
+        validate_file(target)
+
+    assert captured.value.code == "VALIDATION_FAILED"
+    formula_error = next(
+        error
+        for error in captured.value.details["errors"]
+        if error["message"] == "Basic formula syntax check failed."
+    )
+    assert formula_error["details"]["cells"] == ["Sheet!A1"]
+
+
+def test_generated_svg_chart_passes_structural_validation(tmp_path: Path) -> None:
+    data = tmp_path / "chart.csv"
+    data.write_text("label,value\nA,1\nB,2\n", encoding="utf-8")
+    spec = _yaml(
+        tmp_path / "chart.yaml",
+        {
+            "version": 1,
+            "kind": "chart",
+            "type": "bar",
+            "source": "chart.csv",
+            "x": "label",
+            "y": "value",
+        },
+    )
+    target = tmp_path / "chart.svg"
+    build_artifact(spec, target)
+
+    result = validate_file(target)
+
+    assert result["valid"] is True
+    assert result["checks"]["root"] == "svg"
+    assert result["checks"]["element_count"] > 1
+    assert result["human_visual_review_required"] is True
+
+
+def test_malformed_svg_is_rejected(tmp_path: Path) -> None:
+    target = tmp_path / "broken.svg"
+    target.write_text("<svg><g>", encoding="utf-8")
+
+    with pytest.raises(AerError) as captured:
+        validate_file(target)
+
+    assert captured.value.code == "CORRUPT_FILE"
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit"),
+    [("MAX_SVG_ELEMENTS", 2), ("MAX_SVG_DEPTH", 2)],
+)
+def test_svg_structure_limits_are_enforced_before_full_materialization(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, limit_name: str, limit: int
+) -> None:
+    target = tmp_path / "bounded.svg"
+    target.write_text('<svg xmlns="http://www.w3.org/2000/svg"><g><path d="M0 0"/></g></svg>')
+    monkeypatch.setattr(validation_engine, limit_name, limit)
+
+    with pytest.raises(AerError) as captured:
+        validate_file(target)
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
 
 
 def test_manifest_hash_mismatch_is_validation_failure(tmp_path: Path) -> None:
@@ -349,3 +439,14 @@ def test_image_content_must_match_extension(tmp_path: Path) -> None:
     assert captured.value.code == "VALIDATION_FAILED"
     errors = captured.value.details["errors"]
     assert errors[0]["details"] == {"extension": ".jpg", "detected_format": "PNG"}
+
+
+def test_raster_image_validation_requires_human_visual_review(tmp_path: Path) -> None:
+    target = tmp_path / "image.png"
+    Image.new("RGB", (8, 8), "white").save(target)
+
+    result = validate_file(target)
+
+    assert result["valid"] is True
+    assert result["automatic_checks_only"] is True
+    assert result["human_visual_review_required"] is True

@@ -5,7 +5,7 @@ an agent prompt. `aer schema --list-names` is the authoritative installed list.
 
 | Family | Implemented v0.1 behavior |
 |---|---|
-| Store/cache | SHA-256 put/get/cat/stat/verify/list/pin/GC, locked dedup, corruption checks |
+| Store | SHA-256 put/get/cat/stat/verify/list/pin/GC, locked dedup, corruption checks |
 | Inspect | bounded text, JSON, safe YAML, CSV/TSV/JSONL, Git repositories, XLSX, PPTX, DOCX, PDF selections with reversible text compaction |
 | Runner | shell-free argv, timeout/tree cleanup, redacted log store, 256 MiB capture hard limit, bounded failure context |
 | Data | CSV/TSV/JSON/JSONL/XLSX filter/select/rename/sort/page/unique/duplicate/aggregate |
@@ -16,7 +16,7 @@ an agent prompt. `aer schema --list-names` is the authoritative installed list.
 | Image | inspect, resize, crop, cover/contain fit, batch manifest |
 | PDF | inspect, merge, page extraction, split |
 | Archive | deterministic ZIP, embedded hash manifest, verify/list |
-| State/recipe | atomic state files, checkpoints, typed allowlisted workflows, cache/trust policy |
+| State/recipe | atomic state files, checkpoints, typed allowlisted workflows, whole-recipe cache/trust policy |
 | Profile/benchmark | caller-supplied usage aggregation and six executed local comparisons |
 | Doctor | core health, packaged `business-clean` theme metadata, built-in recipes, and capability-specific optional dependency status |
 
@@ -52,3 +52,7 @@ custom template system.
 Unsupported in v0.1: Parquet query, joins, external URL fetch, HWPX, macro-enabled Office
 round-trip, browser automation, a spreadsheet calculation engine, arbitrary recipe code, and GUI
 editing.
+
+`schemas/artifact-v1.schema.json` is a source-distribution reference envelope. Executable
+block-level validation is provided by `aer build SPEC --dry-run`; standalone inspect, build, data,
+conversion, and render results are not cached in v0.1.

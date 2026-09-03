@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -21,6 +24,7 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy src
+      - run: pytest
       - run: pytest --cov=aer --cov-report=term-missing
       - run: python -m build
       - name: Wheel smoke

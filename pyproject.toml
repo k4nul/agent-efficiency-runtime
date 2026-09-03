@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-efficiency-runtime"
-version = "0.1.0"
+version = "0.1.1"
 description = "A deterministic local execution layer that keeps bulky agent work out of model context."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "src/aer/resources/licenses/*"]
 authors = [{name = "k4nul"}]
 keywords = ["ai-agent", "cli", "office", "token-efficiency", "local-runtime"]
 classifiers = [
@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
   "click>=8.1",
-  "filelock>=3.13",
+  "filelock>=3.30,<4",
   "matplotlib>=3.8",
   "openpyxl>=3.1",
   "pathspec>=0.12",
@@ -62,7 +62,13 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-aer = ["py.typed", "resources/recipes/*.yaml", "resources/templates/*"]
+aer = [
+  "py.typed",
+  "resources/fonts/*.ttf",
+  "resources/licenses/*",
+  "resources/recipes/*.yaml",
+  "resources/templates/*",
+]
 
 [tool.ruff]
 target-version = "py311"
@@ -86,8 +92,14 @@ mypy_path = "src"
 warn_unused_ignores = false
 
 [[tool.mypy.overrides]]
-module = ["pptx.*", "docx.*", "openpyxl.*", "PIL.*", "matplotlib.*", "pypdf.*", "regex.*"]
+module = ["pptx.*", "docx.*", "openpyxl.*", "PIL.*", "pypdf.*", "regex.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["matplotlib.*", "numpy.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+follow_imports_for_stubs = true
 
 [[tool.mypy.overrides]]
 module = ["aer.artifacts.presentation.*", "aer.patch.engine"]

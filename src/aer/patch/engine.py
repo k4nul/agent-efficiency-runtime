@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -21,6 +22,7 @@ from pptx import Presentation
 from pptx.chart.data import ChartData
 
 from aer.artifacts.common.spec import manifest_path
+from aer.artifacts.workbook.selectors import stable_cell_name, stable_sheet_name
 from aer.config import Settings
 from aer.errors import AerError
 from aer.hashing import normalized_hash, sha256_bytes, sha256_file
@@ -33,6 +35,8 @@ from aer.limits import (
 from aer.paths import atomic_write_bytes, ensure_regular_input
 from aer.yaml_safety import load_yaml_safely
 from aer.zip_safety import enforce_zip_expansion_limits
+
+MAX_PATCH_OPERATIONS = 1000
 
 
 def load_patch_spec(path: Path) -> dict[str, Any]:
@@ -74,6 +78,14 @@ def load_patch_spec(path: Path) -> dict[str, Any]:
             "artifact.patch",
             "/operations",
         )
+    if len(operations) > MAX_PATCH_OPERATIONS:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            "Patch contains too many operations.",
+            "artifact.patch",
+            "/operations",
+            {"operations": len(operations), "limit": MAX_PATCH_OPERATIONS},
+        )
     for index, operation in enumerate(operations):
         if not isinstance(operation, dict) or not isinstance(operation.get("op"), str):
             raise AerError(
@@ -110,12 +122,38 @@ def _container(root: Any, pointer: str) -> tuple[Any, str]:
     current = root
     for part in parts[:-1]:
         try:
-            current = current[int(part)] if isinstance(current, list) else current[part]
+            current = (
+                current[_array_index(part, pointer, len(current))]
+                if isinstance(current, list)
+                else current[part]
+            )
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise AerError(
                 "INVALID_SELECTOR", "Selector does not exist.", "artifact.patch", pointer
             ) from exc
     return current, parts[-1]
+
+
+def _array_index(key: str, pointer: str, length: int, *, allow_end: bool = False) -> int:
+    if not re.fullmatch(r"0|[1-9][0-9]*", key):
+        raise AerError(
+            "INVALID_SELECTOR",
+            "Array index must be a non-negative decimal integer.",
+            "artifact.patch",
+            pointer,
+        )
+    try:
+        index = int(key)
+    except ValueError as exc:
+        raise AerError(
+            "INVALID_SELECTOR", "Array index is invalid.", "artifact.patch", pointer
+        ) from exc
+    maximum = length if allow_end else length - 1
+    if index > maximum:
+        raise AerError(
+            "INVALID_SELECTOR", "Array index is out of range.", "artifact.patch", pointer
+        )
+    return index
 
 
 def _structured_operation(root: Any, operation: dict[str, Any]) -> None:
@@ -124,12 +162,7 @@ def _structured_operation(root: Any, operation: dict[str, Any]) -> None:
     container, key = _container(root, pointer)
     if op == "set":
         if isinstance(container, list):
-            try:
-                container[int(key)] = operation.get("value")
-            except (IndexError, ValueError) as exc:
-                raise AerError(
-                    "INVALID_SELECTOR", "Array index is invalid.", "artifact.patch", pointer
-                ) from exc
+            container[_array_index(key, pointer, len(container))] = operation.get("value")
         elif isinstance(container, dict):
             container[key] = operation.get("value")
         else:
@@ -139,7 +172,7 @@ def _structured_operation(root: Any, operation: dict[str, Any]) -> None:
     elif op == "remove":
         try:
             if isinstance(container, list):
-                del container[int(key)]
+                del container[_array_index(key, pointer, len(container))]
             else:
                 del container[key]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
@@ -154,16 +187,11 @@ def _structured_operation(root: Any, operation: dict[str, Any]) -> None:
                 "artifact.patch",
                 pointer,
             )
-        try:
-            index = len(container) if key == "-" else int(key)
-        except ValueError as exc:
-            raise AerError(
-                "INVALID_SELECTOR", "Insert array index is invalid.", "artifact.patch", pointer
-            ) from exc
-        if index < 0 or index > len(container):
-            raise AerError(
-                "INVALID_SELECTOR", "Insert array index is out of range.", "artifact.patch", pointer
-            )
+        index = (
+            len(container)
+            if key == "-"
+            else _array_index(key, pointer, len(container), allow_end=True)
+        )
         container.insert(index, operation.get("value"))
     else:
         raise AerError(
@@ -319,6 +347,24 @@ def _pptx_replace_shape(shape: Any, old: str, new: str) -> int:
     return replaced
 
 
+def _set_pptx_shape_text(shape: Any, value: str) -> None:
+    frame = shape.text_frame
+    paragraphs = list(frame.paragraphs)
+    first = paragraphs[0]
+    runs = list(first.runs)
+    run_properties = copy.deepcopy(runs[0]._r.rPr) if runs and runs[0]._r.rPr is not None else None
+    first.clear()
+    run = first.add_run()
+    run.text = value
+    if run_properties is not None:
+        current_properties = run._r.get_or_add_rPr()
+        current_properties.getparent().replace(current_properties, run_properties)
+    for paragraph in paragraphs[1:]:
+        parent = paragraph._p.getparent()
+        if parent is not None:
+            parent.remove(paragraph._p)
+
+
 def _patch_pptx(data: bytes, operations: list[dict[str, Any]]) -> bytes:
     try:
         presentation = Presentation(io.BytesIO(data))
@@ -335,7 +381,7 @@ def _patch_pptx(data: bytes, operations: list[dict[str, Any]]) -> bytes:
                     "presentation.patch",
                     str(operation.get("target")),
                 )
-            shape.text = str(operation.get("value", ""))
+            _set_pptx_shape_text(shape, str(operation.get("value", "")))
         elif op == "pptx.replace_text":
             old = str(operation.get("old", ""))
             if (
@@ -549,12 +595,6 @@ def _patch_docx(data: bytes, operations: list[dict[str, Any]]) -> bytes:
     return buffer.getvalue()
 
 
-def _xlsx_stable_name(sheet_id: str, cell_id: str) -> str:
-    sheet = "".join(character if character.isalnum() else "_" for character in sheet_id)
-    cell = "".join(character if character.isalnum() else "_" for character in cell_id)
-    return f"aer_{sheet}_{cell}"
-
-
 def _xlsx_target(workbook: Any, target: str) -> tuple[Any, str]:
     native = re.fullmatch(r"(.+)!([A-Za-z]+[0-9]+(?::[A-Za-z]+[0-9]+)?)", target)
     stable_address = re.fullmatch(r"sheet:id=([^/]+)/(?:(?:cell|range)=)(.+)", target)
@@ -566,14 +606,20 @@ def _xlsx_target(workbook: Any, target: str) -> tuple[Any, str]:
         assert matched is not None
         stable_id, selected_value = matched.groups()
         address = selected_value if stable_address else ""
-        sheet_name = stable_id if stable_id in workbook.sheetnames else None
-        defined_name = "aer_sheet_" + "".join(
-            character if character.isalnum() else "_" for character in stable_id
-        )
-        if sheet_name is None and defined_name in workbook.defined_names:
+        sheet_name = None
+        defined_name = stable_sheet_name(stable_id)
+        if defined_name in workbook.defined_names:
             destinations = list(workbook.defined_names[defined_name].destinations)
-            if destinations:
-                sheet_name = destinations[0][0]
+            if len(destinations) != 1 or destinations[0][0] not in workbook.sheetnames:
+                raise AerError(
+                    "INVALID_SELECTOR",
+                    "Workbook sheet ID does not resolve to exactly one sheet.",
+                    "workbook.patch",
+                    target,
+                )
+            sheet_name = destinations[0][0]
+        elif stable_id in workbook.sheetnames:
+            sheet_name = stable_id
         if sheet_name is None:
             for name in workbook.sheetnames:
                 if name.lower().replace(" ", "-") == stable_id.lower():
@@ -584,7 +630,7 @@ def _xlsx_target(workbook: Any, target: str) -> tuple[Any, str]:
                 "INVALID_SELECTOR", "Workbook sheet ID was not found.", "workbook.patch", target
             )
         if stable_cell:
-            cell_name = _xlsx_stable_name(stable_id, selected_value)
+            cell_name = stable_cell_name(stable_id, selected_value)
             if cell_name not in workbook.defined_names:
                 raise AerError(
                     "INVALID_SELECTOR",
@@ -593,21 +639,14 @@ def _xlsx_target(workbook: Any, target: str) -> tuple[Any, str]:
                     target,
                 )
             destinations = list(workbook.defined_names[cell_name].destinations)
-            address = next(
-                (
-                    coordinate.replace("$", "")
-                    for destination_sheet, coordinate in destinations
-                    if destination_sheet == sheet_name
-                ),
-                "",
-            )
-            if not address:
+            if len(destinations) != 1 or destinations[0][0] != sheet_name:
                 raise AerError(
                     "INVALID_SELECTOR",
-                    "Workbook cell ID does not resolve within the selected sheet.",
+                    "Workbook cell ID does not resolve to exactly one cell in the selected sheet.",
                     "workbook.patch",
                     target,
                 )
+            address = destinations[0][1].replace("$", "")
     else:
         raise AerError(
             "INVALID_SELECTOR",
@@ -674,7 +713,24 @@ def _patch_xlsx(data: bytes, operations: list[dict[str, Any]]) -> bytes:
                 raise AerError(
                     "INVALID_SELECTOR", "set_cell requires one cell.", "workbook.patch", address
                 )
-            sheet[address] = operation.get("value")
+            has_value = "value" in operation
+            has_formula = "formula" in operation
+            if has_value == has_formula:
+                raise AerError(
+                    "INVALID_PATCH",
+                    "set_cell requires exactly one of value or formula.",
+                    "workbook.patch",
+                    address,
+                )
+            value = operation.get("formula") if has_formula else operation.get("value")
+            if has_formula and (not isinstance(value, str) or not value.startswith("=")):
+                raise AerError(
+                    "INVALID_PATCH",
+                    "set_cell formula must be a string beginning with '='.",
+                    "workbook.patch",
+                    address,
+                )
+            sheet[address] = value
         elif op == "xlsx.set_range":
             if ":" not in address:
                 raise AerError(
@@ -881,14 +937,63 @@ def apply_patch(
     backup: bool = False,
     expected_sha256: str | None = None,
     validate: bool = False,
+    settings: Settings | None = None,
 ) -> dict[str, Any]:
     source = ensure_regular_input(target, operation="artifact.patch")
     spec = load_patch_spec(patch_spec)
     operations = spec["operations"]
-    settings = Settings.load()
-    lock_directory = settings.cache_dir / "patch-locks"
-    lock_directory.mkdir(parents=True, exist_ok=True)
-    lock = FileLock(lock_directory / f"{normalized_hash(str(source))}.lock", timeout=30)
+    runtime_settings = settings or Settings.load()
+    runtime_settings.ensure()
+    lock_directory = runtime_settings.cache_dir / "patch-locks"
+    if lock_directory.is_symlink():
+        raise AerError(
+            "INVALID_ARGUMENT",
+            "Patch lock directory cannot be a symbolic link.",
+            "artifact.patch",
+            str(lock_directory),
+        )
+    lock_directory.mkdir(exist_ok=True, mode=0o700)
+    if not lock_directory.is_dir():
+        raise AerError(
+            "INVALID_ARGUMENT",
+            "Patch lock path must be a directory.",
+            "artifact.patch",
+            str(lock_directory),
+        )
+    if os.name == "posix":
+        lock_mode = stat.S_IMODE(lock_directory.lstat().st_mode)
+        cache_mode = stat.S_IMODE(runtime_settings.cache_dir.lstat().st_mode)
+        reachable_shared_write = bool(
+            (lock_mode & stat.S_IWGRP and cache_mode & stat.S_IXGRP)
+            or (lock_mode & stat.S_IWOTH and cache_mode & stat.S_IXOTH)
+        )
+        if reachable_shared_write:
+            raise AerError(
+                "INVALID_ARGUMENT",
+                "Patch lock directory cannot be writable by reachable group or other users.",
+                "artifact.patch",
+                str(lock_directory),
+            )
+    lock_path = lock_directory / f"{normalized_hash(str(source))}.lock"
+    try:
+        lock_stat = lock_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(lock_stat.st_mode) or not stat.S_ISREG(lock_stat.st_mode):
+            raise AerError(
+                "INVALID_ARGUMENT",
+                "Patch lock must be a regular file.",
+                "artifact.patch",
+                str(lock_path),
+            )
+    lock = FileLock(
+        lock_path,
+        timeout=30,
+        mode=0o600,
+        preserve_lock_file=True,
+        fallback_to_soft=False,
+    )
     try:
         with lock:
             source = ensure_regular_input(source, operation="artifact.patch")
@@ -955,7 +1060,25 @@ def apply_patch(
                         validation_manifest = copy.deepcopy(updated_manifest)
                         validation_manifest["artifact"] = temporary.name
                         atomic_write_bytes(temporary_manifest, _manifest_bytes(validation_manifest))
-                    validation = validate_file(temporary)
+                    try:
+                        validation = validate_file(temporary)
+                    except AerError as exc:
+                        details = copy.deepcopy(exc.details)
+                        checks = details.get("checks")
+                        if isinstance(checks, dict) and checks.get("path") == str(temporary):
+                            checks["path"] = str(source)
+                        raise AerError(
+                            exc.code,
+                            exc.message,
+                            exc.operation,
+                            str(source),
+                            details,
+                            exc.suggested_action,
+                            exc.raw_ref,
+                        ) from exc
+                    validation["checks"]["path"] = str(source)
+                    if dry_run:
+                        validation["candidate_only"] = True
                 finally:
                     temporary_manifest.unlink(missing_ok=True)
                     temporary.unlink(missing_ok=True)

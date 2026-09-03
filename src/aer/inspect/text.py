@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, BinaryIO
 
 from aer.errors import AerError
 from aer.inspect.common import (
@@ -15,6 +18,79 @@ from aer.inspect.common import (
     read_text,
     safe_regex,
 )
+
+_MAX_TEXT_MATCHES = 100_000
+_MAX_TEXT_MATCH_BYTES = 64 * 1024 * 1024
+
+
+class _MatchSpool:
+    """Write exact match records to a private bounded temporary JSON array."""
+
+    def __init__(self, *, raw_sink: RawSink | None, name: str, target: Path) -> None:
+        self._raw_sink = raw_sink
+        self._name = name
+        self._target = target
+        # This object owns the stream and closes it in __exit__.
+        self._stream: BinaryIO = tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115
+        self._stream.write(b"[")
+        self._bytes = 1
+        self._count = 0
+        self._finalized = False
+
+    def __enter__(self) -> _MatchSpool:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exc_type, exc_value, traceback
+        self._stream.close()
+
+    def append(self, record: dict[str, Any]) -> None:
+        encoded = json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        separator = b"," if self._count else b""
+        observed = self._count + 1
+        if observed > _MAX_TEXT_MATCHES or self._bytes + len(separator) + len(encoded) + 1 > (
+            _MAX_TEXT_MATCH_BYTES
+        ):
+            raw_ref = self.preserve()
+            raise AerError(
+                "LIMIT_EXCEEDED",
+                "Text query matches exceed the exact-result safety limit.",
+                operation="inspect",
+                target=str(self._target),
+                details={
+                    "match_limit": _MAX_TEXT_MATCHES,
+                    "encoded_bytes_limit": _MAX_TEXT_MATCH_BYTES,
+                    "observed_at_least": observed,
+                    "partial_results": self._count,
+                },
+                suggested_action="Narrow the query or select a smaller line range.",
+                raw_ref=raw_ref,
+            )
+        self._stream.write(separator)
+        self._stream.write(encoded)
+        self._bytes += len(separator) + len(encoded)
+        self._count = observed
+
+    def preserve(self) -> str | None:
+        if not self._finalized:
+            self._stream.write(b"]")
+            self._bytes += 1
+            self._finalized = True
+        if self._raw_sink is None:
+            return None
+        self._stream.flush()
+        self._stream.seek(0)
+        return self._raw_sink(self._stream.read(), self._name)
 
 
 def inspect_text(
@@ -83,40 +159,48 @@ def inspect_text(
                 target=str(path),
             )
         compiled = safe_regex(query, case_sensitive=case_sensitive) if regex else None
-        exact_matches: list[dict[str, Any]] = []
-        for index, line in enumerate(lines):
-            if line_matches(
-                line,
-                query,
-                regex=compiled,
-                case_sensitive=case_sensitive,
-            ):
+        matches: list[dict[str, Any]] = []
+        match_count = 0
+        text_truncated = False
+        with _MatchSpool(
+            raw_sink=raw_sink,
+            name=f"{path.name}.matches.json",
+            target=path,
+        ) as spool:
+            for index, line in enumerate(lines):
+                if not line_matches(
+                    line,
+                    query,
+                    regex=compiled,
+                    case_sensitive=case_sensitive,
+                ):
+                    continue
                 before_start = max(0, index - context)
                 after_end = min(len(lines), index + context + 1)
-                exact_matches.append(
-                    {
-                        "line": index + 1,
-                        "text": line,
-                        "before": [
-                            {"line": number + 1, "text": lines[number]}
-                            for number in range(before_start, index)
-                        ],
-                        "after": [
-                            {"line": number + 1, "text": lines[number]}
-                            for number in range(index + 1, after_end)
-                        ],
-                    }
-                )
-        matches = exact_matches if full else [_compact_match_record(item) for item in exact_matches]
-        text_truncated = any(_record_has_truncated_text(item) for item in matches)
-        result["query"] = query
-        result["match_count"] = len(matches)
-        result["matches"] = matches[:max_items]
-        if len(matches) > max_items or text_truncated:
-            result["truncated"] = True
-            result["raw_ref"] = preserve_overflow(
-                exact_matches, raw_sink=raw_sink, name=f"{path.name}.matches.json"
-            )
+                exact = {
+                    "line": index + 1,
+                    "text": line,
+                    "before": [
+                        {"line": number + 1, "text": lines[number]}
+                        for number in range(before_start, index)
+                    ],
+                    "after": [
+                        {"line": number + 1, "text": lines[number]}
+                        for number in range(index + 1, after_end)
+                    ],
+                }
+                spool.append(exact)
+                match_count += 1
+                if len(matches) < max_items:
+                    preview_record = exact if full else _compact_match_record(exact)
+                    matches.append(preview_record)
+                    text_truncated = text_truncated or _record_has_truncated_text(preview_record)
+            result["query"] = query
+            result["match_count"] = match_count
+            result["matches"] = matches
+            if match_count > max_items or text_truncated:
+                result["truncated"] = True
+                result["raw_ref"] = spool.preserve()
         return result
 
     exact_preview = [

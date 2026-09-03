@@ -1,12 +1,18 @@
 # Token measurement
 
-`aer profile record` stores values supplied by the caller or model provider. It does not infer a
-missing provider field. Unknown values remain `null`, aggregate completeness flags remain false,
-and cached input tokens are treated as a subset rather than added twice.
+`aer profile record` stores caller-supplied values. Use model-provider usage fields when available,
+but AER does not verify their source or classify a value as measured versus estimated in v0.1;
+record that provenance in `notes`. Unknown values remain `null`, and completeness flags describe
+field presence only. The accounting convention treats cached input, tool schema, and tool result
+tokens as input subsets and reasoning tokens as an output subset. AER does not validate those
+subset relationships. Provider-style total tokens are therefore `input_tokens + output_tokens`
+without adding the diagnostic components again.
 
 Reports calculate reported total tokens, tokens/model calls/tool calls per successful task, retry
-average, success rate, duration, and human edits. Comparisons use only variants with complete
-required token fields and label provider-billed totals as unknown unless supplied externally.
+average, success rate, duration, and human edits. Per-success cost divides the cost of every
+recorded attempt, including failed attempts, by the number of successful tasks. Comparisons use
+only variants whose input/output token fields are complete for every recorded attempt. v0.1 always
+labels provider-billed totals as unknown; it has no billed-cost input or provider integration.
 
 `aer benchmark run` executes six local comparisons:
 

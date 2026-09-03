@@ -50,10 +50,26 @@ if [[ -e "$destination" || -L "$destination" ]]; then
 fi
 
 if [[ "$mode" == "symlink" ]]; then
-  ln -s -- "$script_dir" "$destination"
+  if ! ln -s -- "$script_dir" "$destination"; then
+    echo "Refusing to overwrite existing path: $destination" >&2
+    exit 3
+  fi
 else
-  cp -a -- "$script_dir" "$destination"
+  if ! mkdir -- "$destination"; then
+    echo "Refusing to overwrite existing path: $destination" >&2
+    exit 3
+  fi
+  install_marker="$destination/.aer-installing"
+  touch -- "$install_marker"
+  cleanup_partial_install() {
+    if [[ -f "$install_marker" ]]; then
+      rm -rf -- "$destination"
+    fi
+  }
+  trap cleanup_partial_install EXIT
+  cp -a -- "$script_dir/." "$destination/"
+  rm -- "$install_marker"
+  trap - EXIT
 fi
 
 echo "Installed Agent Efficiency Runtime skill at $destination"
-

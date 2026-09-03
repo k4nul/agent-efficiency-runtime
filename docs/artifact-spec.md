@@ -1,8 +1,9 @@
 # Artifact specification v1
 
 Every spec is safe-loaded YAML or JSON with `version: 1`, a supported `kind`, optional `metadata`,
-and semantic content. Spec files are limited to 4 MiB. The schema is
-`schemas/artifact-v1.schema.json`.
+and semantic content. Spec files are limited to 4 MiB. `schemas/artifact-v1.schema.json` is an
+envelope/reference schema, not a complete block-level validator; `aer build SPEC --dry-run` is the
+authoritative executable validation.
 
 ## Presentation
 
@@ -26,8 +27,12 @@ content:
 
 Layouts are `title`, `section`, `bullets`, `two-column`, `comparison`, `metrics`, `table`, `image`,
 `image-with-caption`, `chart`, `quote`, `timeline`, and `closing`. Layouts choose safe coordinates;
-an advanced block may override `position` with inch values. The builder adds stable IDs, footer,
-slide number, Korean-capable font names/fallback metadata, safe-fit images, and density checks.
+the `bullets` layout may override `position` with inch values. The builder adds stable IDs, footer,
+slide number, safe-fit images, and density checks. Korean Unicode is preserved and the Office
+artifact requests `Noto Sans CJK KR`, but PPTX fonts are not embedded; viewer fallback and render
+fidelity depend on fonts installed on the viewing system.
+Version 1 supports the `business-clean` theme and `metadata.ratio: "16:9"`; other values are
+rejected instead of being silently ignored.
 
 ## Document
 
@@ -40,8 +45,9 @@ supported. Generated DOCX is reopened during validation.
 
 `sheets` contain an `id`, `name`, `columns`, rows (arrays or typed objects), explicit `cells`,
 freeze pane, filter, widths, table, conditional formats, charts, and named ranges. A cell may use
-`formula` and `number_format`. AER preserves formula strings and requests recalculation on open; it
-does not claim to calculate results.
+`formula` and `number_format`; a formula must be a string beginning with `=`. AER preserves formula
+strings, performs only a basic nonempty/parenthesis-balance validation, and requests recalculation
+on open; it does not claim to calculate results.
 
 ## Chart
 
@@ -57,7 +63,9 @@ output: {width: 1400, height: 900}
 ```
 
 Types are `bar`, `horizontal-bar`, `line`, `area`, `pie`, and `scatter`. PNG and SVG output are
-supported. Sources are local CSV, TSV, or JSON arrays; URLs are rejected by omission.
+supported. AER bundles and explicitly loads NanumGothic when rendering charts so Korean labels do
+not depend on system fonts. Sources are local CSV, TSV, or JSON arrays; URLs are rejected by
+omission.
 
 HTML and Markdown accept string content or small semantic block lists. Use `aer build SPEC
 --dry-run` to validate the plan without writing output.

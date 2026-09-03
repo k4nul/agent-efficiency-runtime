@@ -7,7 +7,8 @@
   comments, pivot tables, or every native chart feature.
 - Macro-enabled Office formats are not supported patch targets and macro preservation is not
   promised. Embedded payloads are reported, never executed.
-- Excel formulas are stored and structurally checked but not calculated.
+- Excel formulas must begin with `=` and receive only a basic nonempty/parenthesis-balance check;
+  they are stored but not calculated.
 - Office-to-PDF and Office render validation require LibreOffice. Markup conversion requires
   Pandoc. Direct PDF `--render` validation requires `pdftoppm`; Office render validation still
   reports PDF conversion evidence when `pdftoppm` is absent, but omits raster previews. Those tools
@@ -32,6 +33,10 @@
   conditional-format records.
 - Automated layout, overlap, density, reopen, and render checks do not constitute human visual
   approval.
+- Chart output uses the bundled NanumGothic font for system-font-independent Korean glyph support;
+  exact raster or SVG bytes can still vary with Matplotlib, FreeType, and Pillow versions. PPTX,
+  DOCX, and XLSX outputs request Korean-capable font names but do not embed fonts; viewer fallback
+  and render fidelity depend on fonts installed on the viewing system.
 - CSV/JSON/XLSX queries currently load bounded data into memory. Query input is limited to 256 MiB
   and 1,000,000 rows, with at most 1,000,000 row-by-column cells. Chart and tabular-conversion paths
   use tighter 64 MiB and 100,000-row limits; tabular conversion also enforces the 1,000,000-cell
@@ -49,5 +54,6 @@
   whether that file is packaged and explicitly reports `custom_templates_supported: false`.
 - AER does not provide an LLM, web service, accounts, browser automation, GUI, HWPX, external URL
   fetch, generative image expansion, or arbitrary code sandbox.
-- Profiles cannot discover provider billing usage automatically. Benchmark token values are
-  byte-derived estimates.
+- Profile values are caller-supplied. v0.1 cannot verify their provenance or classify them as
+  measured versus estimated, and it cannot discover provider billing usage automatically.
+  Benchmark token values are explicitly byte-derived estimates.

@@ -240,7 +240,10 @@ def build_document(
         elif kind == "table":
             headers = list(block.get("headers", []))
             rows = list(block.get("rows", []))
-            column_count = len(headers) or (len(rows[0]) if rows else 0)
+            column_count = max(
+                [len(headers), *(len(row) for row in rows)],
+                default=0,
+            )
             if column_count == 0:
                 raise AerError(
                     "INVALID_SPEC",
@@ -252,8 +255,12 @@ def build_document(
             table.style = str(block.get("style", "Table Grid"))
             cursor = 0
             if headers:
-                for column, value in enumerate(headers):
-                    _set_cell_text(table.cell(0, column), value, header=True)
+                for column in range(column_count):
+                    _set_cell_text(
+                        table.cell(0, column),
+                        headers[column] if column < len(headers) else "",
+                        header=True,
+                    )
                 cursor = 1
             for row_index, row in enumerate(rows, start=cursor):
                 for column in range(column_count):

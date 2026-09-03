@@ -29,6 +29,7 @@ from aer.pdf.safety import (
     bounded_pdf_page_count,
     ensure_bounded_pdf_input,
     extract_pdf_page_text,
+    pdf_attachment_names,
     search_pdf_text,
 )
 from aer.zip_safety import enforce_zip_expansion_limits
@@ -107,11 +108,23 @@ def inspect_xlsx(
                 )
         if sheet is not None or cell_range is not None or rows is not None or selector is not None:
             selected_name = sheet or workbook.sheetnames[0]
-            if selected_name not in workbook.sheetnames:
+            if selector_sheet is not None:
+                defined_name = stable_sheet_name(selector_sheet)
+                if defined_name in workbook.defined_names:
+                    destinations = list(workbook.defined_names[defined_name].destinations)
+                    if len(destinations) != 1 or destinations[0][0] not in workbook.sheetnames:
+                        raise _invalid_selector(
+                            selector or selector_sheet,
+                            "Stable sheet ID does not resolve to exactly one sheet.",
+                        )
+                    selected_name = destinations[0][0]
+                elif selector_sheet in workbook.sheetnames:
+                    selected_name = selector_sheet
+            elif selected_name not in workbook.sheetnames:
                 defined_name = stable_sheet_name(selected_name)
                 if defined_name in workbook.defined_names:
                     destinations = list(workbook.defined_names[defined_name].destinations)
-                    if destinations:
+                    if len(destinations) == 1:
                         selected_name = destinations[0][0]
             if selected_name not in workbook.sheetnames:
                 normalized = selected_name.casefold()
@@ -467,13 +480,18 @@ def inspect_pdf(
         for index, item in enumerate(pages, start=1)
     ]
     metadata = {str(key): str(value) for key, value in (reader.metadata or {}).items()}
+    attachment_info = pdf_attachment_names(
+        reader, path=source, operation="inspect", max_items=max_items
+    )
     result: dict[str, Any] = {
         "type": "pdf",
         "encrypted": False,
         "page_count": page_count,
         "metadata": metadata,
         "pages": page_summaries[:max_items],
-        "attachments": sorted(reader.attachments)[:max_items],
+        "attachments": attachment_info["names"],
+        "attachment_count": attachment_info["count"],
+        "attachments_truncated": attachment_info["truncated"],
     }
     selected_page = page or _pdf_selector_page(selector)
     if selected_page is not None:

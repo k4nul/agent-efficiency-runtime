@@ -140,10 +140,18 @@ def _chart(sheet: Any, chart_spec: dict[str, Any]) -> None:
         chart = PieChart()
     elif chart_type == "scatter":
         chart = ScatterChart()
-    else:
+    elif chart_type in {"bar", "horizontal-bar"}:
         chart = BarChart()
         if chart_type == "horizontal-bar":
             chart.type = "bar"
+    else:
+        raise AerError(
+            "INVALID_SPEC",
+            f"Unsupported workbook chart type: {chart_type}",
+            "workbook.build",
+            "/charts/type",
+            {"supported": ["bar", "horizontal-bar", "line", "pie", "scatter"]},
+        )
     chart.title = str(chart_spec.get("title", ""))
     minimum_row = int(chart_spec.get("min_row", 1))
     maximum_row = int(chart_spec.get("max_row", sheet.max_row))
@@ -246,7 +254,24 @@ def build_workbook(
         for cell_index, cell_spec in enumerate(sheet_spec.get("cells", [])):
             address = str(cell_spec["address"])
             cell = sheet[address]
-            cell.value = cell_spec.get("formula", cell_spec.get("value"))
+            has_formula = "formula" in cell_spec
+            has_value = "value" in cell_spec
+            if has_formula and has_value:
+                raise AerError(
+                    "INVALID_SPEC",
+                    "Workbook cell cannot define both value and formula.",
+                    "workbook.build",
+                    f"/sheets/{index}/cells/{cell_index}",
+                )
+            value = cell_spec.get("formula") if has_formula else cell_spec.get("value")
+            if has_formula and (not isinstance(value, str) or not value.startswith("=")):
+                raise AerError(
+                    "INVALID_SPEC",
+                    "Workbook formula must be a string beginning with '='.",
+                    "workbook.build",
+                    f"/sheets/{index}/cells/{cell_index}/formula",
+                )
+            cell.value = value
             if cell_spec.get("number_format"):
                 cell.number_format = str(cell_spec["number_format"])
             raw_cell_id = cell_spec.get("id")

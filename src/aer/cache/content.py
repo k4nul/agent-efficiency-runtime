@@ -109,7 +109,13 @@ class ContentHashCache:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings.load()
         self.store = ObjectStore(self.settings, namespace="cache")
-        self._index_lock = FileLock(self.settings.cache_dir / ".index.lock", timeout=30)
+        self._index_lock = FileLock(
+            self.settings.cache_dir / ".index.lock",
+            timeout=30,
+            mode=0o600,
+            preserve_lock_file=True,
+            fallback_to_soft=False,
+        )
         self._initialize_database()
 
     @staticmethod

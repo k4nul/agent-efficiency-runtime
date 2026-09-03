@@ -3,18 +3,47 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 
 from aer.errors import AerError
 from aer.limits import MAX_IMAGE_PIXELS, MAX_TABULAR_FILE_BYTES, MAX_TABULAR_ROWS
 from aer.paths import atomic_write_bytes, ensure_regular_input
 
 plt.switch_backend("Agg")
-plt.rcParams["font.family"] = ["NanumGothic", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+
+
+@contextmanager
+def _chart_font_context() -> Iterator[None]:
+    resource = files("aer").joinpath("resources/fonts/NanumGothic.ttf")
+    if not resource.is_file():
+        raise AerError(
+            "DEPENDENCY_MISSING",
+            "The packaged NanumGothic chart font is unavailable.",
+            "chart.build",
+            "resources/fonts/NanumGothic.ttf",
+            {"dependency": "NanumGothic"},
+        )
+    with as_file(resource) as font_path:
+        try:
+            font_manager.fontManager.addfont(str(font_path))
+            family = font_manager.FontProperties(fname=str(font_path)).get_name()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AerError(
+                "DEPENDENCY_MISSING",
+                "The packaged NanumGothic chart font is invalid.",
+                "chart.build",
+                "resources/fonts/NanumGothic.ttf",
+                {"dependency": "NanumGothic"},
+            ) from exc
+        with plt.rc_context({"font.family": [family], "axes.unicode_minus": False}):
+            yield
 
 
 def _rows(source: Path) -> list[dict[str, Any]]:
@@ -98,21 +127,19 @@ def build_chart(
             "/output",
             {"width": width, "height": height, "limit": MAX_IMAGE_PIXELS},
         )
-    figure, axis = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
     chart_type = str(spec.get("type", "bar"))
     color = str(spec.get("color", "#2769C1"))
-    if chart_type == "bar":
-        axis.bar(x_values, y_values, color=color)
-    elif chart_type == "horizontal-bar":
-        axis.barh(x_values, y_values, color=color)
-    elif chart_type == "line":
-        axis.plot(x_values, y_values, marker="o", color=color)
-    elif chart_type == "area":
-        axis.fill_between(range(len(x_values)), y_values, color=color, alpha=0.75)
-        axis.set_xticks(range(len(x_values)), x_values)
-    elif chart_type == "pie":
-        axis.pie(y_values, labels=x_values, autopct="%1.1f%%")
-    elif chart_type == "scatter":
+    supported_types = {"bar", "horizontal-bar", "line", "area", "pie", "scatter"}
+    if chart_type not in supported_types:
+        raise AerError(
+            "INVALID_SPEC",
+            f"Unsupported chart type: {chart_type}",
+            "chart.build",
+            "/type",
+            {"supported": sorted(supported_types)},
+        )
+    numeric_x: list[float] | None = None
+    if chart_type == "scatter":
         try:
             numeric_x = [float(value) for value in x_values]
         except ValueError as exc:
@@ -122,35 +149,46 @@ def build_chart(
                 "chart.build",
                 f"column:{x_name}",
             ) from exc
-        axis.scatter(numeric_x, y_values, color=color)
-    else:
-        raise AerError(
-            "INVALID_SPEC", f"Unsupported chart type: {chart_type}", "chart.build", "/type"
-        )
-    axis.set_title(str(spec.get("title", "")))
-    if chart_type != "pie":
-        axis.set_xlabel(str(spec.get("x_label", x_name)))
-        axis.set_ylabel(str(spec.get("y_label", y_name)))
-        axis.grid(axis="y", alpha=0.2)
-    figure.tight_layout()
     format_name = output.suffix.lower().lstrip(".") or "png"
     if format_name not in {"png", "svg"}:
-        plt.close(figure)
         raise AerError(
             "UNSUPPORTED_FORMAT", "Chart output must be PNG or SVG.", "chart.build", str(output)
         )
-    buffer = io.BytesIO()
-    metadata = (
-        {"Software": "Agent Efficiency Runtime"}
-        if format_name == "png"
-        else {"Creator": "Agent Efficiency Runtime", "Date": None}
-    )
-    figure.savefig(
-        buffer,
-        format=format_name,
-        dpi=dpi,
-        metadata=metadata,
-    )
-    plt.close(figure)
+    with _chart_font_context():
+        figure, axis = plt.subplots(figsize=(width / dpi, height / dpi), dpi=dpi)
+        try:
+            if chart_type == "bar":
+                axis.bar(x_values, y_values, color=color)
+            elif chart_type == "horizontal-bar":
+                axis.barh(x_values, y_values, color=color)
+            elif chart_type == "line":
+                axis.plot(x_values, y_values, marker="o", color=color)
+            elif chart_type == "area":
+                axis.fill_between(range(len(x_values)), y_values, color=color, alpha=0.75)
+                axis.set_xticks(range(len(x_values)), x_values)
+            elif chart_type == "pie":
+                axis.pie(y_values, labels=x_values, autopct="%1.1f%%")
+            elif numeric_x is not None:
+                axis.scatter(numeric_x, y_values, color=color)
+            axis.set_title(str(spec.get("title", "")))
+            if chart_type != "pie":
+                axis.set_xlabel(str(spec.get("x_label", x_name)))
+                axis.set_ylabel(str(spec.get("y_label", y_name)))
+                axis.grid(axis="y", alpha=0.2)
+            figure.tight_layout()
+            buffer = io.BytesIO()
+            metadata = (
+                {"Software": "Agent Efficiency Runtime"}
+                if format_name == "png"
+                else {"Creator": "Agent Efficiency Runtime", "Date": None}
+            )
+            figure.savefig(
+                buffer,
+                format=format_name,
+                dpi=dpi,
+                metadata=metadata,
+            )
+        finally:
+            plt.close(figure)
     atomic_write_bytes(output, buffer.getvalue())
     return [{"id": "chart", "type": chart_type, "selector": "chart:id=chart"}], []

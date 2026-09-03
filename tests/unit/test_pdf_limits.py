@@ -22,6 +22,50 @@ def _pdf(path: Path, pages: int, *, title: str = "Bounded PDF") -> Path:
     return path
 
 
+def test_attachment_names_are_listed_without_reading_payload_streams(tmp_path: Path) -> None:
+    target = tmp_path / "attachments.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_attachment("zeta.txt", b"payload-z")
+    writer.add_attachment("alpha.txt", b"payload-a")
+    writer.write(target)
+    reader = PdfReader(target)
+
+    embedded = reader.trailer["/Root"]["/Names"]["/EmbeddedFiles"]
+    names = embedded.raw_get("/Names")
+    for index in range(1, len(names), 2):
+        reference = names[index]
+        reference.get_object = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("attachment file spec must not be resolved")
+        )
+
+    result = pdf_safety.pdf_attachment_names(
+        reader, path=target, operation="pdf.inspect", max_items=1
+    )
+
+    assert result == {"names": ["alpha.txt"], "count": 2, "truncated": True}
+
+
+def test_attachment_name_tree_limits_are_enforced_without_payload_access(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Reader:
+        def __init__(self) -> None:
+            self.trailer = {
+                "/Root": {
+                    "/Pages": {"/Count": 0},
+                    "/Names": {"/EmbeddedFiles": {"/Names": ["a", object(), "b", object()]}},
+                }
+            }
+
+    monkeypatch.setattr(pdf_safety, "_MAX_ATTACHMENT_NAMES", 1)
+    with pytest.raises(AerError) as caught:
+        pdf_safety.pdf_attachment_names(
+            Reader(), path=tmp_path / "many.pdf", operation="pdf.inspect"
+        )
+    assert caught.value.code == "LIMIT_EXCEEDED"
+
+
 def test_page_selector_stops_before_expanding_an_excessive_range(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -197,6 +241,10 @@ def test_pdf_text_worker_is_invoked_without_shell_and_with_discarded_stderr(
 ) -> None:
     source = _pdf(tmp_path / "source.pdf", 1)
     observed: dict[str, object] = {}
+    monkeypatch.setenv("COVERAGE_PROCESS_CONFIG", "serialized")
+    monkeypatch.setenv("COVERAGE_PROCESS_START", "pyproject.toml")
+    monkeypatch.setenv("COV_CORE_SOURCE", "aer")
+    monkeypatch.setenv("AER_WORKER_TEST_VALUE", "preserved")
     payload = {
         "ok": True,
         "result": {
@@ -227,6 +275,13 @@ def test_pdf_text_worker_is_invoked_without_shell_and_with_discarded_stderr(
     assert observed["shell"] is False
     assert observed["stderr"] is subprocess.DEVNULL
     assert observed["timeout"] == pdf_safety.PDF_TEXT_TIMEOUT_SECONDS
+    environment = observed["env"]
+    assert isinstance(environment, dict)
+    assert "COVERAGE_PROCESS_CONFIG" not in environment
+    assert "COVERAGE_PROCESS_START" not in environment
+    assert "COV_CORE_SOURCE" not in environment
+    assert environment["AER_WORKER_TEST_VALUE"] == "preserved"
+    assert pdf_safety.os.environ["COVERAGE_PROCESS_CONFIG"] == "serialized"
 
 
 def test_pdf_text_worker_timeout_is_a_compact_limit_error(

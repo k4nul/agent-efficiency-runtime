@@ -21,6 +21,11 @@ from aer.validation import validate_file
 from aer.zip_safety import enforce_zip_expansion_limits
 
 
+@pytest.fixture(autouse=True)
+def _isolated_aer_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AER_HOME", str(tmp_path / "aer-home"))
+
+
 def _zip_bytes(entries: dict[str, bytes]) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:

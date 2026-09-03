@@ -27,7 +27,7 @@ from aer.inspect import inspect_target
 from aer.patch import apply_patch
 from aer.paths import atomic_write_text
 from aer.pdf import extract_pdf, inspect_pdf, merge_pdfs, split_pdf
-from aer.protocol import execute, failure, success
+from aer.protocol import Metrics, execute, failure, success
 from aer.recipes import RecipeEngine
 from aer.registry import discover as discover_capabilities
 from aer.registry import list_names
@@ -92,7 +92,13 @@ def _domain_response(operation: str, result: dict[str, Any]) -> dict[str, Any]:
     for key, role in (("raw_ref", "raw"), ("result_ref", "result"), ("log_ref", "log")):
         if copied.get(key):
             artifacts.append({"ref": copied[key], "role": role})
-    return success(operation, copied, artifacts=artifacts, warnings=warnings)
+    return success(
+        operation,
+        copied,
+        artifacts=artifacts,
+        warnings=warnings,
+        metrics=Metrics(cache_hit=bool(copied.get("cache_hit", False))),
+    )
 
 
 def _respond(
@@ -461,9 +467,7 @@ def build_command(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     def action() -> dict[str, Any]:
-        result = build_artifact(spec, output, dry_run=dry_run)
-        if validate and not dry_run and output is not None:
-            result["validation"] = validate_file(output)
+        result = build_artifact(spec, output, dry_run=dry_run, validate=validate and not dry_run)
         operation = str(result.pop("operation", "artifact.build"))
         return _domain_response(operation, result)
 

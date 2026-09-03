@@ -445,7 +445,7 @@ class BenchmarkEngine:
         patch_spec_path = workdir / "patch.yaml"
         atomic_write_bytes(patch_spec_path, patch_bytes)
         aer_started = time.perf_counter_ns()
-        patch_result = apply_patch(patch_path, patch_spec_path)
+        patch_result = apply_patch(patch_path, patch_spec_path, settings=self.settings)
         aer_ms = _elapsed_ms(aer_started)
         patched_value = json.loads(patch_path.read_text(encoding="utf-8"))
         aer_valid = (
@@ -537,7 +537,7 @@ class BenchmarkEngine:
         patch_path = workdir / "presentation-patch.yaml"
         atomic_write_bytes(patch_path, patch_bytes)
         aer_started = time.perf_counter_ns()
-        patch_result = apply_patch(patched_output, patch_path)
+        patch_result = apply_patch(patched_output, patch_path, settings=self.settings)
         aer_ms = _elapsed_ms(aer_started)
         patched_text = _pptx_text(patched_output)
         aer_valid = (

@@ -22,6 +22,7 @@ class _MemoryStore:
     def __init__(self) -> None:
         self.data = b""
         self.filename: str | None = None
+        self.used_put_file = False
 
     def put_bytes(
         self,
@@ -32,6 +33,20 @@ class _MemoryStore:
         source: dict[str, object] | None = None,
     ) -> _Stored:
         self.data = data
+        self.filename = filename
+        return _Stored("aer://sha256/" + "b" * 64)
+
+    def put_file(
+        self,
+        path: str | Path,
+        *,
+        filename: str | None = None,
+        mime_type: str | None = None,
+        source: dict[str, object] | None = None,
+    ) -> _Stored:
+        self.used_put_file = True
+        with Path(path).open("rb") as handle:
+            self.data = handle.read()
         self.filename = filename
         return _Stored("aer://sha256/" + "b" * 64)
 
@@ -185,6 +200,7 @@ def test_ten_thousand_rows_return_twenty_row_preview_and_ref(tmp_path: Path) -> 
     assert result.result_rows == 10_000
     assert len(result.preview) == 20
     assert result.result_ref == "aer://sha256/" + "b" * 64
+    assert store.used_put_file is True
     assert len(store.data.splitlines()) == 10_000
     assert len(json.dumps(result.to_dict()).encode()) < 16 * 1024
 
@@ -256,6 +272,7 @@ def test_outputs_are_reopenable_and_stored(tmp_path: Path, people_csv: Path) -> 
         workbook.close()
     assert result.output == str(output)
     assert result.bytes_written == output.stat().st_size
+    assert store.used_put_file is True
     assert store.data == output.read_bytes()
 
 

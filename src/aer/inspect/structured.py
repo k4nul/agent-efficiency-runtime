@@ -12,8 +12,9 @@ import yaml
 from aer.errors import AerError
 from aer.inspect.common import RawSink, preserve_overflow, read_text
 
-_ALIAS_RE = re.compile(r"(?<![\w])\*[A-Za-z0-9_-]+")
 _MAX_YAML_ALIASES = 100
+_MAX_STRUCTURED_DEPTH = 100
+_MAX_STRUCTURED_NODES = 100_000
 
 
 def inspect_structured(
@@ -79,20 +80,27 @@ def inspect_structured(
 def _load(text: str, *, kind: str, path: Path) -> Any:
     try:
         if kind == "json":
-            return json.loads(text)
-        aliases = len(_ALIAS_RE.findall(text))
-        if aliases > _MAX_YAML_ALIASES:
-            raise AerError(
-                "LIMIT_EXCEEDED",
-                "YAML alias count exceeds the safe inspection limit.",
-                operation="inspect",
-                target=str(path),
-                details={"aliases": aliases, "limit": _MAX_YAML_ALIASES},
-            )
-        return yaml.safe_load(text)
+            _preflight_json(text, path)
+            value = json.loads(text)
+        else:
+            _preflight_yaml(text, path)
+            value = yaml.safe_load(text)
+        _validate_loaded_structure(value, path)
+        return value
     except AerError:
         raise
-    except (json.JSONDecodeError, yaml.YAMLError) as exc:
+    except (MemoryError, RecursionError) as exc:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            f"{kind.upper()} exceeds the structured-data safety limits.",
+            operation="inspect",
+            target=str(path),
+            details={
+                "max_depth": _MAX_STRUCTURED_DEPTH,
+                "max_nodes": _MAX_STRUCTURED_NODES,
+            },
+        ) from exc
+    except (ValueError, yaml.YAMLError) as exc:
         raise AerError(
             "CORRUPT_FILE",
             f"{kind.upper()} could not be parsed safely.",
@@ -100,6 +108,109 @@ def _load(text: str, *, kind: str, path: Path) -> Any:
             target=str(path),
             details={"error": str(exc).splitlines()[0][:300]},
         ) from exc
+
+
+def _preflight_json(text: str, path: Path) -> None:
+    """Reject excessive JSON nesting and value counts before object construction."""
+
+    depth = 0
+    nodes = 1
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            nodes += 1
+            _enforce_structure_limits(path, depth=depth, nodes=nodes)
+        elif character in "]}":
+            depth = max(0, depth - 1)
+        elif character in ",:":
+            nodes += 1
+            _enforce_structure_limits(path, depth=depth, nodes=nodes)
+
+
+def _preflight_yaml(text: str, path: Path) -> None:
+    """Count safe-loader events before YAML constructors allocate the value tree."""
+
+    depth = 0
+    nodes = 0
+    aliases = 0
+    for event in yaml.parse(text, Loader=yaml.SafeLoader):
+        if isinstance(event, yaml.events.AliasEvent):
+            aliases += 1
+            nodes += 1
+            if aliases > _MAX_YAML_ALIASES:
+                raise AerError(
+                    "LIMIT_EXCEEDED",
+                    "YAML alias count exceeds the safe inspection limit.",
+                    operation="inspect",
+                    target=str(path),
+                    details={"aliases": aliases, "limit": _MAX_YAML_ALIASES},
+                )
+        elif isinstance(event, (yaml.events.MappingStartEvent, yaml.events.SequenceStartEvent)):
+            depth += 1
+            nodes += 1
+        elif isinstance(event, (yaml.events.MappingEndEvent, yaml.events.SequenceEndEvent)):
+            depth = max(0, depth - 1)
+        elif isinstance(event, yaml.events.ScalarEvent):
+            nodes += 1
+        _enforce_structure_limits(path, depth=depth, nodes=nodes)
+
+
+def _validate_loaded_structure(value: Any, path: Path) -> None:
+    """Iteratively bound logical alias expansion while permitting cyclic inspection."""
+
+    nodes = 0
+    active: set[int] = set()
+    stack: list[tuple[Any, int, bool]] = [(value, 0, False)]
+    while stack:
+        current, depth, leaving = stack.pop()
+        if leaving:
+            active.remove(id(current))
+            continue
+        nodes += 1
+        _enforce_structure_limits(path, depth=depth, nodes=nodes)
+        if not isinstance(current, (dict, list)):
+            continue
+        identity = id(current)
+        if identity in active:
+            continue
+        active.add(identity)
+        stack.append((current, depth, True))
+        if isinstance(current, dict):
+            children = [item for pair in current.items() for item in pair]
+        else:
+            children = list(current)
+        stack.extend((child, depth + 1, False) for child in reversed(children))
+
+
+def _enforce_structure_limits(path: Path, *, depth: int, nodes: int) -> None:
+    if depth > _MAX_STRUCTURED_DEPTH:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            "Structured data exceeds the nesting-depth safety limit.",
+            operation="inspect",
+            target=str(path),
+            details={"depth": depth, "limit": _MAX_STRUCTURED_DEPTH},
+        )
+    if nodes > _MAX_STRUCTURED_NODES:
+        raise AerError(
+            "LIMIT_EXCEEDED",
+            "Structured data exceeds the node-count safety limit.",
+            operation="inspect",
+            target=str(path),
+            details={"nodes": nodes, "limit": _MAX_STRUCTURED_NODES},
+        )
 
 
 def resolve_pointer(value: Any, pointer: str) -> Any:

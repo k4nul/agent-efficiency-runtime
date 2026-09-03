@@ -11,8 +11,9 @@ does not elevate permissions.
   mapping keys must be strings, and floating-point values must be finite.
 - Commands are argv arrays, run without stdin, bounded by timeout, and terminated as a process
   group where the OS supports it. Captured stdout and stderr share a 256 MiB hard limit. On limit
-  breach AER terminates the process tree, sanitizes and stores every byte captured up to that point,
-  and reports `output_limit_exceeded` instead of silently truncating a successful run.
+  breach AER terminates the process tree, stores the captured textual prefix after UTF-8
+  normalization, ANSI removal, sectioning, and secret redaction, and reports
+  `output_limit_exceeded` instead of silently truncating a successful run.
 - API keys, tokens, authorization headers, passwords, private keys, cookies, AWS/GitHub/OpenAI
   credentials, and credential-bearing database URLs are redacted before preview and log storage.
 - Object paths derive only from validated lowercase SHA-256 digests. Writes are atomic and locked;
@@ -46,17 +47,28 @@ does not elevate permissions.
 ## Office policy
 
 AER never executes macros, OLE objects, or embedded executables. The supported build and patch
-extensions are macro-free OOXML. Validation lists suspicious embedded parts and external
-relationships. Office conversion and render validation reject documents containing an external
-relationship, macro part, or executable part before invoking LibreOffice. v0.1 does not promise to
-preserve macro-enabled files.
+extensions are macro-free OOXML. Plain validation lists external relationships in `checks` and
+reports suspicious embedded parts as warnings; `--strict` rejects those warnings but does not
+reject an external relationship by itself. Office conversion and render validation reject
+documents containing an external relationship, macro part, or executable part before invoking
+LibreOffice. This is structural detection, not malware scanning. v0.1 does not promise to preserve
+macro-enabled files.
 
 ## Symlinks and deletion
 
 Store inputs and internal paths reject symlinks. Archive sources reject symlink entries. Store GC
 derives every deletion target from a validated digest and operates only under its configured
 namespace; pinned objects are skipped and `--dry-run` is supported. AER has no command that deletes
-an arbitrary user directory.
+an arbitrary user directory. Newly created runtime paths use owner-only permissions on POSIX.
+Existing custom paths keep their modes, and `AER_HOME`, internal directories, config, database,
+rollback-journal, legacy WAL, and shared-memory paths writable by group or other users are
+rejected instead of being silently changed. SQLite uses rollback-journal mode in v0.1 so
+multi-process writes do not depend on memory-mapped WAL behavior across filesystems.
+Database, rollback-journal, legacy WAL, and shared-memory paths also reject symlinks.
+New patch-lock directories use mode `0700`; a legacy shared-writable patch-lock directory is
+accepted only while a non-traversable private cache directory makes it unreachable to those users.
+AER requires filelock 3.30 or newer and configures native locks to preserve lock path identity and
+fail closed instead of falling back to an unlink-based soft lock.
 
 ## Reversible compression exception
 

@@ -72,16 +72,35 @@ def test_catalog_matches_executable_cli_contract_and_compact_budgets() -> None:
         schema("profile.record", compact=True)["optional"]
     )
     assert "horizontal-bar" in schema("chart.build", compact=True)["operations"]
-    for name in ("presentation.build", "document.build", "workbook.build"):
+    validation = schema("artifact.validate", compact=True)
+    assert "human visual review" in validation["guidance"]["render"]
+    assert "LibreOffice" in validation["requires"][0]
+    chart_example = schema("chart.build", compact=True, example=True)["example"]
+    assert chart_example["spec"]["source"] == "data.csv"
+    assert chart_example["data_csv"].startswith("workflow,tokens")
+    markup = schema("markup.build", compact=True, example=True)
+    assert markup["guidance"]["spec_required"][1] == "kind=html|markdown"
+    assert markup["example"]["spec"]["kind"] == "html"
+    for name in (
+        "presentation.build",
+        "document.build",
+        "workbook.build",
+        "chart.build",
+        "markup.build",
+    ):
         record = schema(name, compact=True, example=True)
-        assert record["guidance"]["spec_required"][0] == "version=1"
-        assert record["example"]["spec"]["version"] == 1
+        assert record["required"].keys() == {"spec"}
+        assert "required unless dry_run" in record["optional"]["output"]["description"]
+        if name in {"presentation.build", "document.build", "workbook.build"}:
+            assert record["guidance"]["spec_required"][0] == "version=1"
+            assert record["example"]["spec"]["version"] == 1
 
 
 @pytest.mark.parametrize(
     ("call", "code"),
     [
         (lambda: discover(""), "INVALID_ARGUMENT"),
+        (lambda: discover("x" * 4097), "LIMIT_EXCEEDED"),
         (lambda: discover("pdf", limit=0), "INVALID_ARGUMENT"),
         (lambda: schema("missing.capability"), "NOT_FOUND"),
     ],

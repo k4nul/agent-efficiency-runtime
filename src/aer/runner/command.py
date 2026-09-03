@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
@@ -281,6 +282,20 @@ def _drain_stream(stream: BinaryIO, capture: _Capture, budget: _CaptureBudget) -
         stream.close()
 
 
+def _wait_for_process_group_exit(process_group: int, *, timeout: float = 1.0) -> None:
+    if os.name != "posix":  # pragma: no cover - exercised on Windows CI
+        return
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
+
+
 def _terminate_process_tree(process: subprocess.Popen[bytes], *, force: bool = False) -> None:
     if os.name == "posix":
         with suppress(ProcessLookupError):
@@ -291,6 +306,7 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], *, force: bool = F
     if force:
         if process.poll() is None:
             process.wait()
+        _wait_for_process_group_exit(process.pid)
         return
     with suppress(subprocess.TimeoutExpired):
         process.wait(timeout=1.0)
@@ -304,6 +320,7 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], *, force: bool = F
             process.kill()
     if process.poll() is None:
         process.wait()
+    _wait_for_process_group_exit(process.pid)
 
 
 def _truncate_utf8(value: str, max_bytes: int) -> str:
@@ -339,9 +356,16 @@ _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----"
 _PRIVATE_KEY_END_RE = re.compile(r"-----END(?: [A-Z0-9]+)? PRIVATE KEY-----", re.IGNORECASE)
 
 
-def _clean_physical_line(raw_line: bytes) -> str | None:
+def _raw_physical_line(raw_line: bytes) -> str:
+    """Decode a captured line and remove terminal escape sequences only."""
+
     line = raw_line.decode("utf-8", errors="replace").removesuffix("\n")
-    line = _ANSI_OSC_RE.sub("", _ANSI_CSI_RE.sub("", line))
+    return _ANSI_OSC_RE.sub("", _ANSI_CSI_RE.sub("", line))
+
+
+def _diagnostic_line(line: str) -> str | None:
+    """Normalize one redacted line for the bounded model-facing diagnostics."""
+
     line = line.rsplit("\r", 1)[-1].rstrip()
     if not line or (_PROGRESS_RE.fullmatch(line) and not _ERROR_RE.search(line)):
         return None
@@ -378,25 +402,24 @@ def _stream_sanitized_section(
     label: str,
     diagnostics: _Diagnostics,
 ) -> str | None:
-    """Append one sanitized stream to the raw log without loading it into memory."""
+    """Append a redacted stream while deriving compact diagnostics separately."""
 
     state = _PrivateKeyState()
     wrote_header = False
     last_line: str | None = None
     with source.open("rb") as handle:
         for raw_line in handle:
-            clean = _clean_physical_line(raw_line)
-            if clean is None:
-                continue
-            line = _redact_private_key_line(clean, state)
-            if not line:
+            line = _redact_private_key_line(_raw_physical_line(raw_line), state)
+            if line is None:
                 continue
             if not wrote_header:
                 destination.write(f"[{label}]\n".encode())
                 wrote_header = True
             destination.write(line.encode("utf-8", errors="replace") + b"\n")
-            diagnostics.add(line)
-            last_line = _truncate_utf8(line, _SUMMARY_BYTES)
+            diagnostic = _diagnostic_line(line)
+            if diagnostic is not None:
+                diagnostics.add(diagnostic)
+                last_line = _truncate_utf8(diagnostic, _SUMMARY_BYTES)
     return last_line
 
 
@@ -575,6 +598,8 @@ def _execute_command(
                     source={
                         "operation": "command.run",
                         "redacted": True,
+                        "ansi_removed": True,
+                        "progress_preserved": True,
                         "output_limit_bytes": _OUTPUT_LIMIT_BYTES,
                         "output_limit_exceeded": output_limit_exceeded,
                     },
@@ -613,9 +638,9 @@ def run_command(
     """Execute an argv array with no shell and compact its diagnostic output.
 
     Output is spooled to private temporary files instead of retained in memory. A command
-    that emits more than 256 MiB across stdout and stderr is terminated immediately; all
-    bytes already emitted into its pipes are drained, sanitized, and persisted before the
-    result is returned. The object-store log therefore never silently truncates output.
+    that emits more than 256 MiB across stdout and stderr is terminated immediately. Captured
+    text is drained, UTF-8-normalized, ANSI-stripped, sectioned, redacted, and persisted before
+    the result is returned. The result explicitly reports a capture-limit termination.
     """
 
     if isinstance(argv, (str, bytes)) or not argv:
@@ -633,10 +658,10 @@ def run_command(
             operation="command.run",
             target="argv",
         )
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise AerError(
             "INVALID_ARGUMENT",
-            "Timeout must be greater than zero.",
+            "Timeout must be a finite value greater than zero.",
             operation="command.run",
             target="timeout",
         )

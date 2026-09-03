@@ -13,6 +13,8 @@ from pptx import Presentation
 from pypdf import PdfWriter
 
 import aer.inspect.repository as repository_inspect
+import aer.inspect.structured as structured_inspect
+import aer.inspect.text as text_inspect
 import aer.pdf.safety as pdf_safety
 from aer.artifacts import build_artifact
 from aer.errors import AerError
@@ -84,6 +86,121 @@ def test_ambiguous_inspect_regex_is_stopped_by_runtime_timeout(tmp_path: Path) -
 
     assert captured.value.code == "LIMIT_EXCEEDED"
     assert "timeout" in captured.value.message
+
+
+@pytest.mark.parametrize(
+    ("suffix", "payload"),
+    [
+        (".json", "[" * 150 + "0" + "]" * 150),
+        (".yaml", "[" * 150 + "0" + "]" * 150),
+    ],
+)
+def test_structured_inspection_rejects_excessive_nesting(
+    tmp_path: Path, suffix: str, payload: str
+) -> None:
+    target = tmp_path / f"deep{suffix}"
+    target.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(AerError) as captured:
+        inspect_target(target)
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
+    assert captured.value.details["limit"] == structured_inspect._MAX_STRUCTURED_DEPTH
+
+
+@pytest.mark.parametrize(
+    ("suffix", "payload"),
+    [
+        (".json", json.dumps(list(range(30)))),
+        (".yaml", "items: [" + ",".join(str(value) for value in range(30)) + "]\n"),
+    ],
+)
+def test_structured_inspection_rejects_excessive_nodes_before_traversal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    suffix: str,
+    payload: str,
+) -> None:
+    monkeypatch.setattr(structured_inspect, "_MAX_STRUCTURED_NODES", 20)
+    target = tmp_path / f"wide{suffix}"
+    target.write_text(payload, encoding="utf-8")
+
+    with pytest.raises(AerError) as captured:
+        inspect_target(target)
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
+    assert captured.value.details["limit"] == 20
+
+
+def test_text_query_streams_only_preview_records_and_preserves_exact_raw(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "many.log"
+    target.write_text("\n".join(f"ERROR item {index}" for index in range(5_000)), encoding="utf-8")
+    stored: list[bytes] = []
+    compact_calls = 0
+    original_compact = text_inspect._compact_match_record
+
+    def compact(record: dict[str, object]) -> dict[str, object]:
+        nonlocal compact_calls
+        compact_calls += 1
+        return original_compact(record)
+
+    def sink(data: bytes, _name: str) -> str:
+        stored.append(data)
+        return "aer://sha256/" + "e" * 64
+
+    monkeypatch.setattr(text_inspect, "_compact_match_record", compact)
+    result = inspect_target(target, query="ERROR", max_items=3, raw_sink=sink)
+
+    assert result["match_count"] == 5_000
+    assert len(result["matches"]) == 3
+    assert compact_calls == 3
+    assert len(json.loads(stored[0])) == 5_000
+
+
+def test_text_query_hard_limit_returns_bounded_partial_raw(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(text_inspect, "_MAX_TEXT_MATCHES", 5)
+    target = tmp_path / "limited.log"
+    target.write_text("\n".join(f"ERROR item {index}" for index in range(10)), encoding="utf-8")
+    stored: list[bytes] = []
+
+    def sink(data: bytes, _name: str) -> str:
+        stored.append(data)
+        return "aer://sha256/" + "f" * 64
+
+    with pytest.raises(AerError) as captured:
+        inspect_target(target, query="ERROR", max_items=2, raw_sink=sink)
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
+    assert captured.value.details["observed_at_least"] == 6
+    assert captured.value.details["partial_results"] == 5
+    assert captured.value.raw_ref == "aer://sha256/" + "f" * 64
+    assert len(json.loads(stored[0])) == 5
+
+
+def test_text_query_encoded_byte_limit_returns_valid_partial_raw(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(text_inspect, "_MAX_TEXT_MATCH_BYTES", 250)
+    target = tmp_path / "large-matches.log"
+    target.write_text("\n".join(["ERROR " + "x" * 100] * 3), encoding="utf-8")
+    stored: list[bytes] = []
+
+    def sink(data: bytes, _name: str) -> str:
+        stored.append(data)
+        return "aer://sha256/" + "a" * 64
+
+    with pytest.raises(AerError) as captured:
+        inspect_target(target, query="ERROR", max_items=2, raw_sink=sink)
+
+    assert captured.value.code == "LIMIT_EXCEEDED"
+    assert captured.value.details["encoded_bytes_limit"] == 250
+    assert captured.value.details["partial_results"] == 1
+    assert captured.value.raw_ref == "aer://sha256/" + "a" * 64
+    assert len(json.loads(stored[0])) == 1
 
 
 def test_json_pointer_slice_outline_and_query(tmp_path: Path) -> None:
@@ -454,6 +571,30 @@ def test_xlsx_selector_resolves_builder_stable_sheet_id(tmp_path: Path) -> None:
 
     assert selected["selection"]["sheet"] == "KPI Dashboard"
     assert selected["selection"]["rows"][0]["cells"][0]["value"] == "tokens"
+
+
+def test_xlsx_stable_selector_wins_over_conflicting_display_name(tmp_path: Path) -> None:
+    spec = tmp_path / "conflicting-workbook.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "workbook",
+                "sheets": [
+                    {"id": "stable", "name": "Dashboard", "columns": ["value"], "rows": [[1]]},
+                    {"id": "other", "name": "stable", "columns": ["value"], "rows": [[2]]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    target = tmp_path / "conflicting.xlsx"
+    build_artifact(spec, target)
+
+    selected = inspect_target(target, selector="sheet:id=stable/cell:A2")
+
+    assert selected["selection"]["sheet"] == "Dashboard"
+    assert selected["selection"]["rows"][0]["cells"][0]["value"] == 1
 
 
 def test_built_xlsx_stable_cell_selector_and_encoded_ids_validate(tmp_path: Path) -> None:

@@ -82,7 +82,7 @@ def result(completed: subprocess.CompletedProcess[str]) -> dict[str, object]:
 def test_version_discovery_schema_and_invalid_args_are_compact(cli: Cli) -> None:
     version = successful(cli("--version"))
     assert version["operation"] == "version"
-    assert version["result"] == {"version": "0.1.0"}
+    assert version["result"] == {"version": "0.1.1"}
 
     discovered = cli("discover", "ppt patch")
     discovered_payload = successful(discovered)
@@ -267,6 +267,23 @@ def test_build_reopen_patch_preserve_and_validate_office(
     assert validated["automatic_checks_only"] is True
 
 
+def test_build_svg_chart_with_validation(cli: Cli, tmp_path: Path) -> None:
+    data = tmp_path / "chart.csv"
+    data.write_text("label,value\nA,1\nB,2\n", encoding="utf-8")
+    spec = tmp_path / "chart.yaml"
+    spec.write_text(
+        "version: 1\nkind: chart\ntype: bar\nsource: chart.csv\nx: label\ny: value\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "chart.svg"
+
+    built = result(cli("build", str(spec), "--validate", "-o", str(output)))
+
+    assert output.is_file()
+    assert built["validation"]["valid"] is True
+    assert built["validation"]["checks"]["root"] == "svg"
+
+
 def test_docx_remove_block_validate_cli_keeps_manifest_consistent(cli: Cli, tmp_path: Path) -> None:
     spec = tmp_path / "logical-list.yaml"
     spec.write_text(
@@ -393,6 +410,10 @@ def test_recipe_project_package_dry_run_and_execution(cli: Cli, tmp_path: Path) 
     assert output.is_file()
     assert executed["steps"][-1]["result"]["valid"] is True
 
+    cached_payload = successful(cli("recipe", "run", "project-package", *variables))
+    assert cached_payload["result"]["cache_hit"] is True
+    assert cached_payload["metrics"]["cache_hit"] is True
+
 
 def test_doctor_treats_missing_optional_tools_as_nonfatal(cli: Cli, tmp_path: Path) -> None:
     empty_path = tmp_path / "empty-bin"
@@ -506,7 +527,8 @@ def test_profile_and_benchmark_cli_persist_export_and_measure(cli: Cli, tmp_path
                 "true",
             )
         )
-        assert recorded["measurement_source"] == "user_recorded"
+        assert recorded["measurement_source"] == "caller_supplied_unverified"
+        assert recorded["estimate_classification"] == "not_recorded"
         assert recorded["provider_billed_tokens_known"] is False
 
     comparison = result(cli("profile", "compare", "--task", "ppt-generation"))

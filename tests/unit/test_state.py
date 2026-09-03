@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import aer.state.manager as state_manager_module
 from aer.config import Settings
 from aer.errors import AerError
 from aer.hashing import normalized_hash
@@ -133,3 +134,52 @@ def test_state_rejects_traversal_conflicts_and_corruption(tmp_path: Path) -> Non
     with pytest.raises(AerError) as cyclic_error:
         manager.show("cyclic")
     assert cyclic_error.value.code == "CORRUPT_FILE"
+
+
+def test_state_rejects_oversized_input_without_replacing_existing_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = StateManager(_settings(tmp_path / "home"))
+    manager.init("bounded", "Keep this exact goal")
+    before = manager.show("bounded")
+    state_path = manager.settings.state_dir / "bounded.yaml"
+    monkeypatch.setattr(
+        state_manager_module,
+        "_MAX_STATE_FILE_BYTES",
+        state_path.stat().st_size + 32,
+    )
+
+    with pytest.raises(AerError) as oversized:
+        manager.update("bounded", completed=["x" * 128])
+
+    assert oversized.value.code == "LIMIT_EXCEEDED"
+    assert oversized.value.operation == "state.update"
+    assert manager.show("bounded") == before
+
+
+def test_state_read_is_bounded_and_list_skips_dangling_symlinks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = StateManager(_settings(tmp_path / "home"))
+    monkeypatch.setattr(state_manager_module, "_MAX_STATE_FILE_BYTES", 128)
+    oversized = manager.settings.state_dir / "oversized.yaml"
+    oversized.write_bytes(b"x" * 129)
+    (manager.settings.state_dir / "dangling.yaml").symlink_to(tmp_path / "missing.yaml")
+
+    with pytest.raises(AerError) as rejected:
+        manager.show("oversized")
+
+    assert rejected.value.code == "LIMIT_EXCEEDED"
+    assert manager.list() == []
+
+
+def test_state_rejects_non_string_update_atomically(tmp_path: Path) -> None:
+    manager = StateManager(_settings(tmp_path / "home"))
+    manager.init("typed", "Keep this state")
+    before = manager.show("typed")
+
+    with pytest.raises(AerError) as rejected:
+        manager.update("typed", completed=["valid", 42])  # type: ignore[list-item]
+
+    assert rejected.value.code == "INVALID_ARGUMENT"
+    assert manager.show("typed") == before

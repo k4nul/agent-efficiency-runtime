@@ -22,7 +22,7 @@ from aer.limits import (
 )
 from aer.paths import atomic_write_bytes, ensure_regular_input
 
-SLIDE_W = 13.333
+SLIDE_W = 40 / 3
 SLIDE_H = 7.5
 COLORS = {
     "navy": RGBColor(25, 42, 67),
@@ -236,7 +236,16 @@ def _chart_type(value: str) -> XL_CHART_TYPE:
         "pie": XL_CHART_TYPE.PIE,
         "scatter": XL_CHART_TYPE.XY_SCATTER,
     }
-    return mapping.get(value, XL_CHART_TYPE.COLUMN_CLUSTERED)
+    try:
+        return mapping[value]
+    except KeyError as exc:
+        raise AerError(
+            "INVALID_SPEC",
+            f"Unsupported presentation chart type: {value}",
+            "presentation.build",
+            "/chart_type",
+            {"supported": sorted(mapping)},
+        ) from exc
 
 
 def _add_chart(slide: Any, slide_id: str, block: dict[str, Any]) -> Any:
@@ -669,6 +678,23 @@ def build_presentation(
             "/theme",
             {"supported": ["business-clean"]},
         )
+    metadata = spec.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise AerError(
+            "INVALID_SPEC",
+            "Presentation metadata must be an object.",
+            "presentation.build",
+            "/metadata",
+        )
+    ratio = metadata.get("ratio", "16:9")
+    if ratio != "16:9":
+        raise AerError(
+            "INVALID_SPEC",
+            "Unsupported presentation aspect ratio.",
+            "presentation.build",
+            "/metadata/ratio",
+            {"supported": ["16:9"]},
+        )
     content = spec.get("content")
     if not isinstance(content, list) or not content:
         raise AerError(
@@ -691,7 +717,7 @@ def build_presentation(
     presentation = Presentation()
     presentation.slide_width = Inches(SLIDE_W)
     presentation.slide_height = Inches(SLIDE_H)
-    presentation.core_properties.title = str(spec.get("metadata", {}).get("title", ""))
+    presentation.core_properties.title = str(metadata.get("title", ""))
     presentation.core_properties.subject = "Built by Agent Efficiency Runtime"
     fixed = datetime(2000, 1, 1, tzinfo=UTC)
     presentation.core_properties.created = fixed

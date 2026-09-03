@@ -10,6 +10,7 @@ from aer.registry.catalog import CAPABILITIES
 from aer.registry.models import Capability
 
 _TOKEN_RE = re.compile(r"[\w.+:-]+", re.UNICODE)
+_MAX_DISCOVERY_QUERY_BYTES = 4 * 1024
 
 
 class CapabilityRegistry:
@@ -43,6 +44,14 @@ class CapabilityRegistry:
                 "INVALID_ARGUMENT",
                 "Discovery query must not be empty.",
                 operation="discover",
+            )
+        query_bytes = len(query.encode("utf-8"))
+        if query_bytes > _MAX_DISCOVERY_QUERY_BYTES:
+            raise AerError(
+                "LIMIT_EXCEEDED",
+                "Discovery query exceeds the size limit.",
+                operation="discover",
+                details={"bytes": query_bytes, "limit": _MAX_DISCOVERY_QUERY_BYTES},
             )
         if limit < 1 or limit > 20:
             raise AerError(

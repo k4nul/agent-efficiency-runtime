@@ -275,11 +275,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         object_schema(
             {
                 "spec": _path("Presentation YAML or JSON specification."),
-                "output": _path("Destination PPTX."),
+                "output": _path("Destination PPTX; required unless dry_run is true."),
                 "validate": {"type": "boolean", "default": False},
                 "dry_run": {"type": "boolean", "default": False},
             },
-            ("spec", "output"),
+            ("spec",),
         ),
         EMPTY_OUTPUT,
         (
@@ -301,11 +301,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         object_schema(
             {
                 "spec": _path("Document specification."),
-                "output": _path("Destination DOCX."),
+                "output": _path("Destination DOCX; required unless dry_run is true."),
                 "validate": {"type": "boolean", "default": False},
                 "dry_run": {"type": "boolean", "default": False},
             },
-            ("spec", "output"),
+            ("spec",),
         ),
         EMPTY_OUTPUT,
         (
@@ -327,11 +327,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         object_schema(
             {
                 "spec": _path("Workbook specification."),
-                "output": _path("Destination XLSX."),
+                "output": _path("Destination XLSX; required unless dry_run is true."),
                 "validate": {"type": "boolean", "default": False},
                 "dry_run": {"type": "boolean", "default": False},
             },
-            ("spec", "output"),
+            ("spec",),
         ),
         EMPTY_OUTPUT,
         (
@@ -353,14 +353,27 @@ CAPABILITIES: tuple[Capability, ...] = (
         object_schema(
             {
                 "spec": _path("Chart specification."),
-                "output": _path("Destination PNG or SVG."),
+                "output": _path("Destination PNG or SVG; required unless dry_run is true."),
                 "validate": {"type": "boolean", "default": False},
                 "dry_run": {"type": "boolean", "default": False},
             },
-            ("spec", "output"),
+            ("spec",),
         ),
         EMPTY_OUTPUT,
-        ({"spec": "examples/chart.yaml", "output": "chart.png"},),
+        (
+            {
+                "command": {"spec": "chart.yaml", "output": "chart.png"},
+                "spec": {
+                    "version": 1,
+                    "kind": "chart",
+                    "type": "bar",
+                    "source": "data.csv",
+                    "x": "workflow",
+                    "y": "tokens",
+                },
+                "data_csv": "workflow,tokens\ndirect,100\naer,40\n",
+            },
+        ),
         operations=("bar", "horizontal-bar", "line", "area", "pie", "scatter"),
     ),
     Capability(
@@ -370,13 +383,28 @@ CAPABILITIES: tuple[Capability, ...] = (
         object_schema(
             {
                 "spec": _path("Markup specification."),
-                "output": _path("Destination file."),
+                "output": _path("Destination file; required unless dry_run is true."),
                 "validate": {"type": "boolean", "default": False},
                 "dry_run": {"type": "boolean", "default": False},
             },
-            ("spec", "output"),
+            ("spec",),
         ),
         EMPTY_OUTPUT,
+        (
+            {
+                "command": {"spec": "page.yaml", "output": "page.html"},
+                "spec": {
+                    "version": 1,
+                    "kind": "html",
+                    "metadata": {"title": "AER"},
+                    "content": [{"type": "paragraph", "text": "Deterministic output"}],
+                },
+            },
+        ),
+        guidance={
+            "spec_required": ["version=1", "kind=html|markdown", "content"],
+            "content": "UTF-8 string or a small semantic block array.",
+        },
     ),
     Capability(
         "text.patch",
@@ -482,6 +510,11 @@ CAPABILITIES: tuple[Capability, ...] = (
             ("target",),
         ),
         EMPTY_OUTPUT,
+        requires=("LibreOffice for Office --render; pdftoppm for PDF --render",),
+        guidance={
+            "render": "Machine conversion/raster evidence only; human visual review remains required.",
+            "dependencies": "Office --render uses LibreOffice; PDF --render uses pdftoppm.",
+        },
     ),
     Capability(
         "artifact.convert",
@@ -638,26 +671,26 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "profile.record",
-        "Record and compare measured agent calls, tokens, retries, duration, and success.",
+        "Record and compare caller-supplied agent calls, tokens, retries, duration, and success.",
         ("profile", "tokens", "calls", "retries", "success", "compare", "metrics"),
         object_schema(
             {
                 "task": _string("Task family."),
                 "variant": _string("Compared workflow variant."),
-                "model": _string("Provider model identifier, when measured."),
+                "model": _string("Caller-supplied provider model identifier."),
                 "model_calls": _integer("Model call count."),
                 "tool_calls": _integer("Tool call count."),
-                "input_tokens": _integer("Provider-reported input tokens."),
-                "cached_input_tokens": _integer("Provider-reported cached input tokens."),
-                "output_tokens": _integer("Provider-reported output tokens."),
-                "reasoning_tokens": _integer("Provider-reported reasoning tokens."),
-                "tool_schema_tokens": _integer("Measured tool schema tokens."),
-                "tool_result_tokens": _integer("Measured tool result tokens."),
+                "input_tokens": _integer("Caller-supplied input tokens."),
+                "cached_input_tokens": _integer("Caller-supplied cached input tokens."),
+                "output_tokens": _integer("Caller-supplied output tokens."),
+                "reasoning_tokens": _integer("Caller-supplied reasoning tokens."),
+                "tool_schema_tokens": _integer("Caller-supplied tool schema tokens."),
+                "tool_result_tokens": _integer("Caller-supplied tool result tokens."),
                 "retries": _integer("Retry count."),
-                "duration_ms": _integer("Measured duration in milliseconds."),
+                "duration_ms": _integer("Caller-supplied duration in milliseconds."),
                 "success": {"type": "boolean"},
                 "human_edits": _integer("Human edit count."),
-                "notes": _string("Measurement notes."),
+                "notes": _string("Provenance or measurement notes."),
             },
             ("task", "variant", "success"),
         ),

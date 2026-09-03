@@ -21,6 +21,7 @@ from aer.pdf.safety import (
     enforce_pdf_aggregate_input_limit,
     ensure_bounded_pdf_input,
     extract_pdf_page_text,
+    pdf_attachment_names,
 )
 
 
@@ -170,12 +171,17 @@ def inspect_pdf(path: Path, *, page: int | None = None) -> dict[str, Any]:
         path=source,
         limit=MAX_PDF_PAGES,
     )
+    attachment_info = pdf_attachment_names(
+        reader, path=source, operation="pdf.inspect", max_items=20
+    )
     result: dict[str, Any] = {
         "path": str(source),
         "page_count": page_count,
         "encrypted": reader.is_encrypted,
         "metadata": _metadata(reader),
-        "attachments": sorted((reader.attachments or {}).keys())[:20],
+        "attachments": attachment_info["names"],
+        "attachment_count": attachment_info["count"],
+        "attachments_truncated": attachment_info["truncated"],
     }
     if page is not None:
         if page < 1 or page > page_count:

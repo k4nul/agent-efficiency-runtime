@@ -46,10 +46,11 @@ def test_profile_records_exact_fields_and_persists(tmp_path: Path) -> None:
         notes="measured from provider response",
     )
 
-    assert record.reported_total_tokens == 80_280
+    assert record.reported_total_tokens == 56_450
     assert record.missing_token_fields == ()
     assert record.as_dict()["provider_billed_tokens"] is None
-    assert record.as_dict()["measurement_source"] == "user_recorded"
+    assert record.as_dict()["measurement_source"] == "caller_supplied_unverified"
+    assert record.as_dict()["estimate_classification"] == "not_recorded"
     assert ProfileStore(settings).list()[0] == record
     with settings.connect() as connection:
         columns = [
@@ -116,19 +117,21 @@ def test_report_and_compare_use_actual_recorded_aggregates(tmp_path: Path) -> No
     assert report.overall.records == 3
     assert report.overall.successes == 2
     assert report.overall.success_rate == pytest.approx(2 / 3)
-    assert direct.reported_total_tokens == 204
-    assert direct.tokens_per_success == 137
-    assert direct.model_calls_per_success == 8
-    assert direct.tool_calls_per_success == 14
+    assert direct.reported_total_tokens == 170
+    assert direct.tokens_per_success == 170
+    assert direct.model_calls_per_success == 10
+    assert direct.tool_calls_per_success == 18
     assert direct.average_retries == 2
     assert direct.average_duration_ms == 750
-    assert aer.tokens_per_success == 60
+    assert aer.tokens_per_success == 50
     assert direct.field_totals["cached_input_tokens"] == 120
     assert direct.as_dict()["measurement"]["cached_input_tokens_counted_separately"] is True
+    assert direct.as_dict()["measurement"]["provenance_verified"] is False
+    assert direct.as_dict()["measurement"]["estimate_classification"] == "not_recorded"
 
     comparison = profiles.compare("ppt")
     assert comparison.lowest_tokens_per_success_variant == "aer"
-    assert comparison.differences_from_lowest["direct"]["absolute_more_than_lowest"] == 77
+    assert comparison.differences_from_lowest["direct"]["absolute_more_than_lowest"] == 120
     assert comparison.as_dict()["provider_billed_tokens_known"] is False
 
 
@@ -143,16 +146,62 @@ def test_missing_provider_values_remain_explicitly_unknown(tmp_path: Path) -> No
     )
 
     assert record.reported_total_tokens == 120
-    assert set(record.missing_token_fields) == {
-        "reasoning_tokens",
-        "tool_schema_tokens",
-        "tool_result_tokens",
-    }
+    assert record.missing_token_fields == ()
     report = profiles.report(task="unknown-provider")
     assert report.overall.tokens_per_success == 120
-    assert report.overall.tokens_per_success_complete is False
+    assert report.overall.tokens_per_success_complete is True
     assert report.overall.missing_records["reasoning_tokens"] == 1
-    assert profiles.compare("unknown-provider").lowest_tokens_per_success_variant is None
+    assert profiles.compare("unknown-provider").lowest_tokens_per_success_variant == "partial"
+
+
+def test_per_success_cost_includes_failed_attempts_and_requires_complete_attempts(
+    tmp_path: Path,
+) -> None:
+    profiles = ProfileStore(settings_for(tmp_path / "aer"))
+    profiles.record(
+        task="retrying",
+        variant="unstable",
+        success=False,
+        input_tokens=900,
+        output_tokens=100,
+        model_calls=9,
+        tool_calls=12,
+    )
+    profiles.record(
+        task="retrying",
+        variant="unstable",
+        success=True,
+        input_tokens=90,
+        output_tokens=10,
+        model_calls=1,
+        tool_calls=2,
+    )
+    profiles.record(
+        task="retrying",
+        variant="incomplete",
+        success=False,
+        input_tokens=25,
+        model_calls=1,
+        tool_calls=1,
+    )
+    profiles.record(
+        task="retrying",
+        variant="incomplete",
+        success=True,
+        input_tokens=50,
+        output_tokens=5,
+        model_calls=1,
+        tool_calls=1,
+    )
+
+    report = profiles.report(task="retrying")
+    unstable = report.variants["unstable"]
+    assert unstable.tokens_per_success == 1_100
+    assert unstable.model_calls_per_success == 10
+    assert unstable.tool_calls_per_success == 14
+    assert unstable.tokens_per_success_complete is True
+    assert report.variants["incomplete"].tokens_per_success_complete is False
+    assert profiles.compare("retrying").lowest_tokens_per_success_variant == "unstable"
 
 
 def test_export_has_stable_columns_and_atomic_symlink_policy(tmp_path: Path) -> None:
@@ -185,6 +234,10 @@ def test_export_has_stable_columns_and_atomic_symlink_policy(tmp_path: Path) -> 
         ),
         (
             {"task": "x", "variant": "y", "success": True, "input_tokens": 1.5},
+            "INVALID_ARGUMENT",
+        ),
+        (
+            {"task": "x", "variant": "y", "success": True, "input_tokens": 2**63},
             "INVALID_ARGUMENT",
         ),
         (

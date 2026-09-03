@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -190,6 +191,7 @@ def build_artifact(
     output: Path | None,
     *,
     dry_run: bool = False,
+    validate: bool = False,
 ) -> dict[str, Any]:
     spec = load_spec(spec_path)
     kind = str(spec["kind"])
@@ -236,8 +238,35 @@ def build_artifact(
         elements, warnings = _run_builder(spec, staged_output, spec_dir=spec_path.resolve().parent)
         staged_manifest = write_manifest(staged_output, kind=kind, spec=spec, elements=elements)
         artifact_sha256 = json.loads(staged_manifest.read_text(encoding="utf-8"))["artifact_sha256"]
+        validation_result: dict[str, Any] | None = None
+        if validate:
+            # Validate the staged artifact and its staged manifest before either
+            # replaces a caller-visible file.
+            from aer.validation import validate_file
+
+            try:
+                validation_result = validate_file(staged_output)
+            except AerError as exc:
+                details = copy.deepcopy(exc.details)
+                checks = details.get("checks")
+                if isinstance(checks, dict) and checks.get("path") == str(staged_output):
+                    checks["path"] = str(output)
+                target = str(output) if exc.target == str(staged_output) else exc.target
+                raise AerError(
+                    exc.code,
+                    exc.message,
+                    exc.operation,
+                    target,
+                    details,
+                    exc.suggested_action,
+                    exc.raw_ref,
+                ) from exc
         _publish_build(staged_output, staged_manifest, output, manifest)
-    return {
+        if validation_result is not None:
+            checks = validation_result.get("checks")
+            if isinstance(checks, dict):
+                checks["path"] = str(output)
+    result = {
         "operation": f"{kind}.build",
         "output": str(output),
         "manifest": str(manifest),
@@ -245,3 +274,6 @@ def build_artifact(
         "warnings": warnings,
         "element_count": len(elements),
     }
+    if validation_result is not None:
+        result["validation"] = validation_result
+    return result

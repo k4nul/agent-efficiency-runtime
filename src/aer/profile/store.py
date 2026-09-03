@@ -35,13 +35,10 @@ PROFILE_FIELDS: Final[tuple[str, ...]] = (
     "notes",
 )
 
-TOKEN_TOTAL_FIELDS: Final[tuple[str, ...]] = (
-    "input_tokens",
-    "output_tokens",
-    "reasoning_tokens",
-    "tool_schema_tokens",
-    "tool_result_tokens",
-)
+# Provider usage APIs normally report reasoning tokens as part of output tokens and
+# tool schemas/results as part of input tokens.  Keep those component fields for
+# diagnosis, but do not add them to the provider-style total a second time.
+TOKEN_TOTAL_FIELDS: Final[tuple[str, ...]] = ("input_tokens", "output_tokens")
 
 NUMERIC_FIELDS: Final[tuple[str, ...]] = (
     "model_calls",
@@ -56,6 +53,7 @@ NUMERIC_FIELDS: Final[tuple[str, ...]] = (
     "duration_ms",
     "human_edits",
 )
+_MAX_SQLITE_INTEGER: Final[int] = (1 << 63) - 1
 
 
 def _timestamp(value: datetime | str | None = None) -> str:
@@ -104,7 +102,7 @@ class ProfileRecord:
 
     @property
     def reported_total_tokens(self) -> int:
-        """Sum supplied token categories, excluding cached input as a subset."""
+        """Return input plus output tokens without double-counting component subsets."""
 
         return sum(int(getattr(self, field) or 0) for field in TOKEN_TOTAL_FIELDS)
 
@@ -119,7 +117,8 @@ class ProfileRecord:
                 "total_tokens": self.reported_total_tokens,
                 "total_tokens_complete": not self.missing_token_fields,
                 "missing_token_fields": list(self.missing_token_fields),
-                "measurement_source": "user_recorded",
+                "measurement_source": "caller_supplied_unverified",
+                "estimate_classification": "not_recorded",
                 "provider_billed_tokens": None,
                 "provider_billed_tokens_known": False,
             }
@@ -169,16 +168,20 @@ class AggregateMetrics:
             "known_records": self.known_records,
             "missing_records": self.missing_records,
             "measurement": {
-                "source": "user_recorded_values_only",
-                "total_token_formula": (
-                    "input_tokens + output_tokens + reasoning_tokens + "
-                    "tool_schema_tokens + tool_result_tokens"
-                ),
+                "source": "caller_supplied_unverified",
+                "provenance_verified": False,
+                "estimate_classification": "not_recorded",
+                "total_token_formula": "input_tokens + output_tokens",
                 "cached_input_tokens_counted_separately": True,
+                "component_tokens_counted_separately": [
+                    "reasoning_tokens",
+                    "tool_schema_tokens",
+                    "tool_result_tokens",
+                ],
+                "per_success_includes_failed_attempt_cost": True,
                 "missing_values_treated_as_zero_in_reported_subtotals": True,
                 "provider_billed_tokens": None,
                 "provider_billed_tokens_known": False,
-                "estimated_values_included": False,
             },
         }
 
@@ -212,13 +215,15 @@ class ProfileComparison:
             "variants": {name: value.as_dict() for name, value in self.variants.items()},
             "lowest_tokens_per_success_variant": self.lowest_tokens_per_success_variant,
             "differences_from_lowest": self.differences_from_lowest,
-            "comparison_basis": "complete user-recorded token fields only",
+            "comparison_basis": (
+                "all recorded input/output tokens divided by successful task count"
+            ),
             "provider_billed_tokens_known": False,
         }
 
 
 class ProfileStore:
-    """Record and aggregate actual values supplied by an agent provider or caller."""
+    """Record and aggregate caller-supplied values without asserting their provenance."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings.load()
@@ -267,11 +272,14 @@ class ProfileStore:
         }
         for field, value in numeric_values.items():
             if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                or value > _MAX_SQLITE_INTEGER
             ):
                 raise AerError(
                     "INVALID_ARGUMENT",
-                    f"{field} must be a non-negative integer or omitted.",
+                    f"{field} must be a non-negative 64-bit integer or omitted.",
                     operation="profile.record",
                     target=field,
                 )
@@ -471,20 +479,19 @@ class ProfileStore:
         }
         missing_records = {field: record_count - known_records[field] for field in NUMERIC_FIELDS}
         reported_total = sum(record.reported_total_tokens for record in records)
-        successful_total = sum(record.reported_total_tokens for record in successes)
-        success_tokens_complete = all(not record.missing_token_fields for record in successes)
+        success_tokens_complete = all(not record.missing_token_fields for record in records)
 
-        def successful_per(field: str) -> tuple[float | None, bool]:
+        def per_success(field: str) -> tuple[float | None, bool]:
             if not successes:
                 return None, False
-            complete = all(getattr(record, field) is not None for record in successes)
+            complete = all(getattr(record, field) is not None for record in records)
             total = sum(
-                int(value) for record in successes if (value := getattr(record, field)) is not None
+                int(value) for record in records if (value := getattr(record, field)) is not None
             )
             return total / success_count, complete
 
-        model_calls_per_success, model_calls_complete = successful_per("model_calls")
-        tool_calls_per_success, tool_calls_complete = successful_per("tool_calls")
+        model_calls_per_success, model_calls_complete = per_success("model_calls")
+        tool_calls_per_success, tool_calls_complete = per_success("tool_calls")
 
         def average(field: str) -> float | None:
             count = known_records[field]
@@ -496,7 +503,7 @@ class ProfileStore:
             failures=record_count - success_count,
             success_rate=None if record_count == 0 else success_count / record_count,
             reported_total_tokens=reported_total,
-            tokens_per_success=(None if success_count == 0 else successful_total / success_count),
+            tokens_per_success=(None if success_count == 0 else reported_total / success_count),
             tokens_per_success_complete=bool(successes) and success_tokens_complete,
             model_calls_per_success=model_calls_per_success,
             model_calls_per_success_complete=model_calls_complete,

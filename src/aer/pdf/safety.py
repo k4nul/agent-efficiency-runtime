@@ -21,7 +21,23 @@ MAX_PDF_TEXT_VALIDATION_PAGES = 100
 PDF_TEXT_TIMEOUT_SECONDS = 10
 _MAX_WORKER_REQUEST_BYTES = 64 * 1024
 _MAX_WORKER_OUTPUT_BYTES = 2 * MAX_PDF_EXTRACTED_TEXT_BYTES + 256 * 1024
+_MAX_ATTACHMENT_NAMES = 10_000
+_MAX_ATTACHMENT_NAME_BYTES = 4 * 1024
+_MAX_ATTACHMENT_NAMES_BYTES = 1024 * 1024
+_MAX_ATTACHMENT_TREE_NODES = 10_000
 _run_subprocess = subprocess.run
+
+
+def _worker_environment() -> dict[str, str]:
+    """Keep test/profiler bootstrap hooks outside the resource-limited worker."""
+
+    environment = os.environ.copy()
+    environment.pop("COVERAGE_PROCESS_CONFIG", None)
+    environment.pop("COVERAGE_PROCESS_START", None)
+    for name in tuple(environment):
+        if name.startswith("COV_CORE_"):
+            environment.pop(name)
+    return environment
 
 
 def ensure_bounded_pdf_input(path: Path, *, operation: str) -> Path:
@@ -110,6 +126,127 @@ def bounded_pdf_page_count(
     return actual
 
 
+def pdf_attachment_names(
+    reader: Any,
+    *,
+    path: Path,
+    operation: str,
+    max_items: int = 20,
+) -> dict[str, Any]:
+    """List embedded-file names without materializing attachment payload streams."""
+
+    def raw_get(value: Any, key: str) -> Any:
+        try:
+            if hasattr(value, "raw_get"):
+                return value.raw_get(key)
+            if isinstance(value, dict):
+                return value.get(key)
+        except (KeyError, TypeError):
+            return None
+        return None
+
+    def resolve(value: Any) -> Any:
+        return value.get_object() if hasattr(value, "get_object") else value
+
+    try:
+        root = resolve(raw_get(reader.trailer, "/Root"))
+        names = resolve(raw_get(root, "/Names"))
+        embedded = raw_get(names, "/EmbeddedFiles")
+        if embedded is None:
+            return {"names": [], "count": 0, "truncated": False}
+
+        pending = [embedded]
+        seen: set[tuple[int, int] | int] = set()
+        found: list[str] = []
+        total_name_bytes = 0
+        node_count = 0
+        while pending:
+            reference = pending.pop()
+            identity: tuple[int, int] | int
+            if hasattr(reference, "idnum"):
+                identity = (int(reference.idnum), int(getattr(reference, "generation", 0)))
+            else:
+                identity = id(reference)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            node_count += 1
+            if node_count > _MAX_ATTACHMENT_TREE_NODES:
+                raise AerError(
+                    "LIMIT_EXCEEDED",
+                    "PDF attachment name tree exceeds the node limit.",
+                    operation,
+                    str(path),
+                    {"nodes": node_count, "limit": _MAX_ATTACHMENT_TREE_NODES},
+                )
+            node = resolve(reference)
+            flat_names = resolve(raw_get(node, "/Names"))
+            if flat_names is not None:
+                if not isinstance(flat_names, (list, tuple)) or len(flat_names) % 2:
+                    raise AerError(
+                        "CORRUPT_FILE",
+                        "PDF attachment name tree is malformed.",
+                        operation,
+                        str(path),
+                    )
+                for index in range(0, len(flat_names), 2):
+                    # Do not resolve the adjacent file-spec reference: doing so can
+                    # lead callers toward its potentially compressed payload stream.
+                    name = str(flat_names[index])
+                    encoded_size = len(name.encode("utf-8", errors="replace"))
+                    if encoded_size > _MAX_ATTACHMENT_NAME_BYTES:
+                        raise AerError(
+                            "LIMIT_EXCEEDED",
+                            "PDF attachment name exceeds the size limit.",
+                            operation,
+                            str(path),
+                            {"bytes": encoded_size, "limit": _MAX_ATTACHMENT_NAME_BYTES},
+                        )
+                    total_name_bytes += encoded_size
+                    found.append(name)
+                    if (
+                        len(found) > _MAX_ATTACHMENT_NAMES
+                        or total_name_bytes > _MAX_ATTACHMENT_NAMES_BYTES
+                    ):
+                        raise AerError(
+                            "LIMIT_EXCEEDED",
+                            "PDF attachment names exceed the safety limit.",
+                            operation,
+                            str(path),
+                            {
+                                "attachments": len(found),
+                                "attachment_limit": _MAX_ATTACHMENT_NAMES,
+                                "name_bytes": total_name_bytes,
+                                "name_bytes_limit": _MAX_ATTACHMENT_NAMES_BYTES,
+                            },
+                        )
+            kids = resolve(raw_get(node, "/Kids"))
+            if kids is not None:
+                if not isinstance(kids, (list, tuple)):
+                    raise AerError(
+                        "CORRUPT_FILE",
+                        "PDF attachment name tree has invalid children.",
+                        operation,
+                        str(path),
+                    )
+                pending.extend(reversed(kids))
+        ordered = sorted(found)
+        return {
+            "names": ordered[:max_items],
+            "count": len(ordered),
+            "truncated": len(ordered) > max_items,
+        }
+    except AerError:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise AerError(
+            "CORRUPT_FILE",
+            "PDF attachment name tree could not be read.",
+            operation,
+            str(path),
+        ) from exc
+
+
 def extract_pdf_page_text(path: Path, page: int, *, operation: str) -> dict[str, Any]:
     """Extract one page in a resource-limited subprocess and return bounded text."""
 
@@ -175,6 +312,7 @@ def _run_text_worker(path: Path, request: dict[str, Any], *, operation: str) -> 
             check=False,
             shell=False,
             start_new_session=os.name == "posix",
+            env=_worker_environment(),
         )
     except subprocess.TimeoutExpired as exc:
         raise AerError(

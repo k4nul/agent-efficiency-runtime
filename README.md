@@ -9,7 +9,8 @@ of model context.
 AER replaces repeated Office/plotting boilerplate with versioned semantic specs, full-file reads
 with bounded selectors, full regeneration with atomic patches, raw command logs with compact
 diagnostics, and copied binary/data payloads with `aer://sha256/...` references. It also persists
-task state and measured profiles locally. AER contains no LLM client and makes no model API calls.
+task state and caller-supplied usage profiles locally. AER contains no LLM client and makes no
+model API calls.
 
 ## Install
 
@@ -18,9 +19,10 @@ Linux and Python 3.11+ are supported. From a checkout:
 ```bash
 python3.11 -m venv .venv
 .venv/bin/python -m pip install .
+source .venv/bin/activate
 export AER_HOME="$HOME/.aer"       # optional; this is already the default
-.venv/bin/aer --version
-.venv/bin/aer doctor
+aer --version
+aer doctor
 ```
 
 The default installation includes the Office, PDF, image, and chart libraries needed by the core
@@ -58,7 +60,7 @@ person needs a different presentation. Internal tracebacks appear only with glob
 | `aer build`, `aer patch`, `aer validate` | Create semantic artifacts, mutate selected elements, and verify them. |
 | `aer convert`, `aer image`, `aer pdf`, `aer archive` | Deterministic conversion, media, PDF, and ZIP operations. |
 | `aer state`, `aer recipe` | Persist long-task facts and run bounded trusted workflows. |
-| `aer profile`, `aer benchmark` | Record provider-reported usage and run measured local comparisons. |
+| `aer profile`, `aer benchmark` | Aggregate caller-supplied usage and run measured local comparisons. |
 | `aer doctor` | Check core health and report optional capability availability. |
 
 ## Representative use
@@ -71,9 +73,9 @@ aer store cat aer://sha256/REPLACE_WITH_RETURNED_DIGEST --start-line 10 --end-li
 ```
 
 The runner spools output instead of retaining it in memory. It terminates a command that emits
-more than 256 MiB across stdout and stderr, then stores the complete captured prefix after secret
-redaction and reports `output_limit_exceeded`; it does not silently label that prefix as a full
-log.
+more than 256 MiB across stdout and stderr, then stores the captured textual prefix after UTF-8
+normalization, stdout/stderr sectioning, ANSI removal, and secret redaction. It reports
+`output_limit_exceeded` and does not silently label that prefix as a full log.
 
 Large data stays local; only up to 20 rows are previewed:
 
@@ -98,12 +100,13 @@ aer state checkpoint release-01
 Install the wheel first, then install the included skill without changing existing Codex config:
 
 ```bash
-./integrations/codex/install.sh --symlink
+./integrations/codex/install.sh --copy
 ```
 
-The installer detects `$CODEX_HOME` (falling back to `~/.codex`), supports an explicit
-`--target`, and refuses to overwrite a destination. The project-level guidance is available at
-`integrations/codex/AGENTS-snippet.md`.
+The installer is included in the source checkout and source distribution. It detects
+`$CODEX_HOME` (falling back to `~/.codex`), supports an explicit `--target`, and refuses to
+overwrite a destination. Use `--symlink` only for development when the checkout will remain in
+place. The project-level guidance is available at `integrations/codex/AGENTS-snippet.md`.
 
 ## Validation and benchmarks
 
@@ -140,6 +143,8 @@ continuously verified here. Office round-tripping covers the documented semantic
 native feature. Formula strings are preserved but not calculated. Office-to-PDF and render checks
 need LibreOffice; markup conversion needs Pandoc; PDF raster previews need `pdftoppm`. Automated
 checks do not replace human visual review. v0.1 does not query Parquet, fetch external URLs,
-preserve macro-enabled formats, provide a GUI, or measure provider tokens automatically.
+preserve macro-enabled formats, provide a GUI, or measure provider tokens automatically. Profile
+values are caller-supplied and their measured-versus-estimated provenance is not verified or
+classified by v0.1; use provider usage values when available and record provenance in `notes`.
 
 See `docs/` for protocols, specs, security assumptions, development commands, and deeper limits.

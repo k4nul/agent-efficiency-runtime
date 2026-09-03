@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import stat
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -713,7 +714,38 @@ class ObjectStore:
         )
 
     def _initialize_database(self) -> None:
-        with self.settings.connect() as connection:
+        lock_path = self.settings.home / ".database-init.lock"
+        try:
+            lock_stat = lock_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISLNK(lock_stat.st_mode) or not stat.S_ISREG(lock_stat.st_mode):
+                raise AerError(
+                    "INVALID_ARGUMENT",
+                    "Database initialization lock must be a regular file.",
+                    operation="store.init",
+                    target=str(lock_path),
+                )
+            if os.name == "posix" and stat.S_IMODE(lock_stat.st_mode) & (
+                stat.S_IWGRP | stat.S_IWOTH
+            ):
+                raise AerError(
+                    "INVALID_ARGUMENT",
+                    "Database initialization lock cannot be writable by group or other users.",
+                    operation="store.init",
+                    target=str(lock_path),
+                )
+        with (
+            FileLock(
+                lock_path,
+                timeout=30,
+                mode=0o600,
+                preserve_lock_file=True,
+                fallback_to_soft=False,
+            ),
+            self.settings.connect() as connection,
+        ):
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS aer_objects (
@@ -784,7 +816,13 @@ class ObjectStore:
                 operation="store.lock",
                 target=digest,
             )
-        return FileLock(self._locks_root / f"{digest}.lock", timeout=30)
+        return FileLock(
+            self._locks_root / f"{digest}.lock",
+            timeout=30,
+            mode=0o600,
+            preserve_lock_file=True,
+            fallback_to_soft=False,
+        )
 
     def _publish(
         self,

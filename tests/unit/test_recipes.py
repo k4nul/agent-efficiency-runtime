@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sys
 import time
 from pathlib import Path
@@ -7,13 +8,14 @@ from pathlib import Path
 import pytest
 import yaml
 
+import aer.recipes.engine as recipe_engine_module
 from aer.config import Settings
 from aer.errors import AerError
 from aer.recipes import RecipeEngine
 
 
 def _settings(home: Path) -> Settings:
-    return Settings(
+    settings = Settings(
         home=home,
         store_dir=home / "store",
         cache_dir=home / "cache",
@@ -23,6 +25,8 @@ def _settings(home: Path) -> Settings:
         database=home / "database.sqlite3",
         config_file=home / "config.toml",
     )
+    settings.ensure()
+    return settings
 
 
 def _recipe(path: Path, value: dict[str, object]) -> Path:
@@ -493,6 +497,32 @@ def test_recipe_cache_invalidates_when_source_directory_content_changes(tmp_path
     assert third["cache_hit"] is False
 
 
+def test_builtin_office_recipe_cache_ignores_generated_output_contents_and_versions_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path / "home")
+    spec = tmp_path / "document.yaml"
+    spec.write_text(
+        "version: 1\nkind: document\ncontent:\n  - {id: title, type: title, text: Cached report}\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "delivery"
+    variables = {"spec": str(spec), "output_dir": str(output_dir)}
+    engine = RecipeEngine(settings)
+
+    first = engine.run("office-delivery", variables=variables)
+    second = engine.run("office-delivery", variables=variables)
+
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is True
+    assert (output_dir / "report.docx").is_file()
+    assert (tmp_path / "delivery.zip").is_file()
+
+    monkeypatch.setattr(recipe_engine_module, "__version__", "999.0-test")
+    invalidated = engine.run("office-delivery", variables=variables)
+    assert invalidated["cache_hit"] is False
+
+
 def test_recipe_typed_inputs_reject_invalid_values(tmp_path: Path) -> None:
     settings = _settings(tmp_path / "home")
     _recipe(
@@ -520,3 +550,110 @@ def test_recipe_typed_inputs_reject_invalid_values(tmp_path: Path) -> None:
             dry_run=True,
         )
     assert invalid.value.code == "INVALID_ARGUMENT"
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, math.nan, math.inf])
+def test_recipe_rejects_non_finite_or_non_positive_overall_timeout(
+    tmp_path: Path, timeout: float
+) -> None:
+    engine = RecipeEngine(_settings(tmp_path / "home"))
+
+    with pytest.raises(AerError) as invalid:
+        engine.run("project-package", variables={}, timeout=timeout)
+
+    assert invalid.value.code == "INVALID_ARGUMENT"
+    assert invalid.value.target == "timeout"
+
+
+def test_recipe_rejects_oversized_variable_before_dry_run_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path / "home")
+    _recipe(
+        settings.recipes_dir / "bounded-input.yaml",
+        {
+            "version": 1,
+            "name": "bounded-input",
+            "inputs": {"source": {"type": "path"}},
+            "steps": [
+                {
+                    "id": "store",
+                    "uses": "store.put",
+                    "with": {"source": "${{ inputs.source }}"},
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(recipe_engine_module, "_MAX_RECIPE_INPUT_VALUE_BYTES", 16)
+
+    with pytest.raises(AerError) as oversized:
+        RecipeEngine(settings).run(
+            "bounded-input",
+            variables={"source": "x" * 17},
+            dry_run=True,
+        )
+
+    assert oversized.value.code == "LIMIT_EXCEEDED"
+    assert oversized.value.details == {"bytes": 17, "limit": 16}
+
+
+def test_recipe_cache_hashing_rejects_oversized_content_input(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path / "home")
+    source = tmp_path / "source.csv"
+    source.write_text("id,value\n1,123456789\n", encoding="utf-8")
+    output = tmp_path / "result.csv"
+    _recipe(
+        settings.recipes_dir / "bounded-cache.yaml",
+        {
+            "version": 1,
+            "name": "bounded-cache",
+            "inputs": {
+                "source": {"type": "path"},
+                "output": {"type": "path"},
+            },
+            "steps": [
+                {
+                    "id": "query",
+                    "uses": "data.query",
+                    "with": {
+                        "source": "${{ inputs.source }}",
+                        "output": "${{ inputs.output }}",
+                    },
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(recipe_engine_module, "_MAX_RECIPE_CACHE_INPUT_BYTES", 8)
+
+    with pytest.raises(AerError) as oversized:
+        RecipeEngine(settings).run(
+            "bounded-cache",
+            variables={"source": str(source), "output": str(output)},
+        )
+
+    assert oversized.value.code == "LIMIT_EXCEEDED"
+    assert not output.exists()
+
+
+def test_recipe_rejects_invalid_literal_command_timeout(tmp_path: Path) -> None:
+    recipe = _recipe(
+        tmp_path / "invalid-timeout.yaml",
+        {
+            "version": 1,
+            "name": "invalid-timeout",
+            "steps": [
+                {
+                    "id": "command",
+                    "uses": "command.run",
+                    "with": {"argv": [sys.executable, "-c", "pass"], "timeout": "nan"},
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(AerError) as invalid:
+        RecipeEngine(_settings(tmp_path / "home")).validate(recipe)
+
+    assert invalid.value.code == "INVALID_SPEC"
